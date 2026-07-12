@@ -1,17 +1,20 @@
 (ns aac.decode
   "AAC-LC decode: ADTS frame -> PCM samples (ISO/IEC 14496-3:2005 §4.4-4.6).
    This is the top-level entry point tying together `aac.adts` (framing,
-   pre-existing), `aac.ics` (side info + noiseless-coding spectral decode),
-   `aac.dequant` (inverse quantization), and `aac.imdct` (filterbank:
-   IMDCT + windowing + overlap-add).
+   pre-existing), `aac.ics` (side info + noiseless-coding spectral decode,
+   incl. `channel_pair_element()`/CPE stereo parsing), `aac.dequant`
+   (inverse quantization), `aac.stereo` (mid/side reconstruction), and
+   `aac.imdct` (filterbank: IMDCT + windowing + overlap-add).
 
    ## Scope (deliberately narrow — this is the ecosystem's first audio
    codec implementation; see `com-junkawasaki/root` task history)
 
-   - **Mono only** (`single_channel_element()` / SCE; channel_configuration
-     1). Stereo (`channel_pair_element()`/CPE, incl. mid/side + intensity
-     stereo), LFE, coupling channels, and multi-SCE/program_config_element
-     streams all throw.
+   - **Mono (`single_channel_element()`/SCE, channel_configuration 1) OR
+     stereo (`channel_pair_element()`/CPE, channel_configuration 2,
+     including mid/side stereo — see `aac.ics`/`aac.stereo`)**. Intensity
+     stereo (a per-band pseudo-codebook, not a CPE-level tool), LFE,
+     coupling channels, and multi-element/program_config_element streams
+     all still throw.
    - **`ONLY_LONG_SEQUENCE` only** — `aac.ics/ics-info!` throws for
      LONG_START/EIGHT_SHORT/LONG_STOP. In particular this means encoder
      transient regions (attack transients almost always trigger a block
@@ -32,20 +35,23 @@
    ## Multi-element raw_data_block handling
 
    A real encoder's `raw_data_block()` is not always a bare single
-   `single_channel_element()` — `ffmpeg -c:a aac` was observed (during
-   development) to prepend a `fill_element()` (`id_syn_ele` 6, ancillary/
-   padding data, Table 4.11) before the SCE even in a mono stream's very
-   first frame. `decode-raw-data-block!` below skips `fill_element()`/
+   `single_channel_element()`/`channel_pair_element()` — `ffmpeg -c:a aac`
+   was observed (during development) to prepend a `fill_element()`
+   (`id_syn_ele` 6, ancillary/padding data, Table 4.11) before the SCE/CPE
+   even in a stream's very first frame. `decode-raw-data-block!` (mono) and
+   `decode-raw-data-block-cpe!` (stereo) below both skip `fill_element()`/
    `data_stream_element()` (Tables 4.10/4.11) structurally to reach the
-   SCE, and throws immediately on any OTHER syntax element (CPE/CCE/LFE/
-   PCE) since those are out of this repo's mono-only scope."
+   SCE/CPE, and throw immediately on any OTHER syntax element since those
+   are out of this repo's scope."
   (:require [aac.bits :as bits]
             [aac.ics :as ics]
             [aac.dequant :as dequant]
+            [aac.stereo :as stereo]
             [aac.tables :as tables]
             [aac.imdct :as imdct]))
 
 (def ^:private id-sce 0)
+(def ^:private id-cpe 1)
 (def ^:private id-dse 4)
 (def ^:private id-fil 6)
 (def ^:private id-end 7)
@@ -99,6 +105,38 @@
         (throw (ex-info "aac.decode: unsupported syntax element (only mono single_channel_element is in scope)"
                          {:id-syn-ele id-syn-ele}))))))
 
+(defn decode-raw-data-block-cpe!
+  "Like `decode-raw-data-block!` but for a STEREO `raw_data_block()` —
+   skips `fill_element()`/`data_stream_element()` the same way, but expects
+   (and decodes) a `channel_pair_element()` rather than an SCE. Returns
+   `aac.ics/decode-channel-pair-element!`'s result: {:ch0 :ch1 :ms-mask
+   :common-window?}. Throws on any other syntax element (out of scope for
+   the stereo path — in particular a bare SCE here is NOT accepted, use
+   `decode-raw-data-block!`/`decode-adts-frame`/`decode-frames` for
+   mono channel_configuration 1 streams)."
+  [r sfi]
+  (loop [guard 0]
+    (when (>= guard 16)
+      (throw (ex-info "aac.decode: too many syntax elements without finding a channel_pair_element" {})))
+    (let [id-syn-ele (bits/bits! r 3)]
+      (cond
+        (= id-syn-ele id-cpe)
+        (do (bits/bits! r 4) ;; element_instance_tag
+            (ics/decode-channel-pair-element! r sfi frame-len))
+
+        (= id-syn-ele id-dse)
+        (do (data-stream-element! r) (recur (inc guard)))
+
+        (= id-syn-ele id-fil)
+        (do (fill-element! r) (recur (inc guard)))
+
+        (= id-syn-ele id-end)
+        (throw (ex-info "aac.decode: reached END without a channel_pair_element (empty/silent frame or unsupported layout)" {}))
+
+        :else
+        (throw (ex-info "aac.decode: unsupported syntax element (only stereo channel_pair_element is in scope for decode-adts-frame-stereo)"
+                         {:id-syn-ele id-syn-ele}))))))
+
 (defn decode-adts-frame
   "Decode one ADTS frame (as produced by `aac.adts/frames`/`parse-header`)
    to 1024 PCM samples (floats — see `aac.decode/pcm->int16` for s16
@@ -140,6 +178,65 @@
       acc
       (let [{:keys [pcm window-shape overlap]} (decode-adts-frame (first fs) prev-shape prev-overlap)]
         (recur (rest fs) window-shape overlap (into acc pcm))))))
+
+(defn decode-adts-frame-stereo
+  "Decode one STEREO ADTS frame (channel_configuration 2,
+   `channel_pair_element()`) to two independent 1024-sample PCM channels.
+   `prev-window-shape-l`/`prev-overlap-l` and `prev-window-shape-r`/
+   `prev-overlap-r` carry EACH channel's OWN running filterbank state
+   independently — the CPE's shared `ics_info()` (`common_window`==1) only
+   shares window_sequence/window_shape/max_sfb as bitstream SIDE INFO for
+   THIS frame; the §4.6.11 filterbank (IMDCT + 50%-overlap-add) itself still
+   runs once per channel with its own independent history, exactly like two
+   parallel mono streams (`aac.imdct/decode-frame` is called twice, once per
+   channel, mirroring `decode-adts-frame`'s single call).
+
+   Pipeline per frame: `aac.decode/decode-raw-data-block-cpe!` (side info +
+   noiseless-coding spectral decode for BOTH channels) -> `aac.dequant/
+   dequantize` independently per channel (channel-local scalefactors/
+   codebooks) -> `aac.stereo/apply-ms` (cross-channel M/S reconstruction,
+   using the pair's shared `:ms-mask` — a no-op pass-through when
+   `common_window`==0 or `ms_mask_present`==0) -> `aac.imdct/decode-frame`
+   independently per channel.
+
+   Returns {:pcm-l :pcm-r [1024 floats each] :window-shape-l :window-shape-r
+   :overlap-l :overlap-r} — the last four, to pass as this same frame's
+   `prev-*` for the NEXT frame (mirrors `decode-adts-frame`'s single-channel
+   contract)."
+  [frame prev-window-shape-l prev-overlap-l prev-window-shape-r prev-overlap-r]
+  (let [r (bits/reader (:payload frame))
+        sfi (:sampling-frequency-index frame)
+        {:keys [ch0 ch1 ms-mask]} (decode-raw-data-block-cpe! r sfi)
+        swb-offsets (tables/swb-offsets sfi)
+        spec0 (dequant/dequantize (:coeffs ch0) (:sfb-cb ch0) (:scale-factors ch0) swb-offsets)
+        spec1 (dequant/dequantize (:coeffs ch1) (:sfb-cb ch1) (:scale-factors ch1) swb-offsets)
+        [spec-l spec-r] (stereo/apply-ms spec0 spec1 ms-mask swb-offsets)
+        {pcm-l :pcm overlap-l :overlap} (imdct/decode-frame spec-l (:window-shape ch0) prev-window-shape-l prev-overlap-l)
+        {pcm-r :pcm overlap-r :overlap} (imdct/decode-frame spec-r (:window-shape ch1) prev-window-shape-r prev-overlap-r)]
+    {:pcm-l pcm-l :pcm-r pcm-r
+     :window-shape-l (:window-shape ch0) :window-shape-r (:window-shape ch1)
+     :overlap-l overlap-l :overlap-r overlap-r}))
+
+(defn decode-frames-stereo
+  "Like `decode-frames` but for STEREO `channel_pair_element()` ADTS frames
+   — threads TWO independent filterbank states (one per channel; see
+   `decode-adts-frame-stereo`'s docstring for why overlap/window-shape are
+   never shared across channels even though CPE side info sometimes is).
+   Cold-starts (`aac.imdct/zero-overlap`) both channels at the FIRST frame
+   given, same convention/mid-stream-slice caveat as `decode-frames`.
+   Returns {:left :right} (each a concatenated PCM vector, 1024 samples per
+   frame, per channel)."
+  [frames]
+  (loop [fs frames
+         prev-shape-l 0 prev-overlap-l imdct/zero-overlap
+         prev-shape-r 0 prev-overlap-r imdct/zero-overlap
+         acc-l [] acc-r []]
+    (if (empty? fs)
+      {:left acc-l :right acc-r}
+      (let [{:keys [pcm-l pcm-r window-shape-l window-shape-r overlap-l overlap-r]}
+            (decode-adts-frame-stereo (first fs) prev-shape-l prev-overlap-l prev-shape-r prev-overlap-r)]
+        (recur (rest fs) window-shape-l overlap-l window-shape-r overlap-r
+               (into acc-l pcm-l) (into acc-r pcm-r))))))
 
 (defn pcm->int16
   "Round + clip one float PCM sample to a signed 16-bit integer, matching
