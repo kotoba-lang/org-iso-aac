@@ -3,11 +3,15 @@
    (MPEG-2 AAC) / ISO/IEC 14496-3 (MPEG-4 AAC) Annex. ADTS wraps raw AAC
    access units in a 7-byte (9-byte with CRC) self-contained header carrying
    sample rate, channel config, and frame length, so a stream of AAC frames
-   can be split without a container. Pure cljc, zero dependencies. Framing
-   and header fields only — the AAC raw_data_block (SCE/CPE/LFE syntax
-   elements, spectral data) is not decoded, matching this repo family's
-   'coded audio/video payload stays opaque, only framing/metadata is
-   decoded' boundary (see org-iso-h264/org-ietf-opus siblings).
+   can be split without a container. Pure cljc, zero dependencies. This
+   namespace covers framing and header fields only — decoding the
+   raw_data_block payload (`:payload` on each frame map) into actual PCM
+   samples is `aac.decode` (mono, ONLY_LONG_SEQUENCE AAC-LC only; see that
+   namespace's docstring for the full scope statement — this repo's
+   original 'payload stays opaque' framing-only boundary, matching
+   org-iso-h264/org-ietf-opus siblings, no longer holds ecosystem-wide now
+   that this repo implements real sample decode, but `aac.adts` itself
+   still only deals with the container-level header).
 
    New implementation (not an extraction — utsushi.bitstream/parse-adts was
    an unimplemented TODO stub) as part of the kotoba-lang reverse-domain
