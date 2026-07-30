@@ -1,6 +1,9 @@
 (ns aac.huffman
-  "AAC-LC noiseless-coding Huffman decode (ISO/IEC 14496-3:2005 §4.6.3.3
-   \"Decoding process\" + Annex 4.A tables, `aac.huffman-tables`). Builds a
+  "AAC-LC noiseless-coding Huffman decode AND encode (ISO/IEC 14496-3:2005
+   §4.6.3.3 \"Decoding process\" + Annex 4.A tables, `aac.huffman-tables`) —
+   see the `encode side` section at the bottom of this file for the write
+   direction (`tuple->idx`/`tuple-bits`/`write-spectral-tuple!`/
+   `write-scalefactor-dpcm!`), which reuses the very same tables. Builds a
    canonical binary trie per codebook from the (length, codeword) table and
    walks it one bit at a time — a plain, literal transcription of the
    decoding process, not FAAD2's 2-step lookup-table optimization (deliberate:
@@ -171,3 +174,134 @@
                 v))
             tuple)
       tuple)))
+
+;; --- encode side (`aac.encode`, com-junkawasaki/root ADR-2800002800) -----
+;;
+;; The SAME Annex 4.A tables serve both directions: decode walks a trie built
+;; from them, encode indexes them directly, because `[length codeword]` at
+;; index i is exactly what has to be written for the n-tuple that index i
+;; denotes. `kotoba-lang/org-iso-h264`'s `h264.cavlc` established that
+;; precedent in this org (one table, `residual-block!` and
+;; `encode-residual-block!` on either side of it); doing the same here means a
+;; transcription error in `aac.huffman-tables` cannot be right for one
+;; direction and wrong for the other, and the round-trip tests exercise both.
+
+(defn- abs- [v] (if (neg? v) (- v) v))
+
+(defn- index-digit
+  "The table digit for one tuple element `v` under codebook `cb`: the signed
+   value offset by `lav` for signed codebooks, the magnitude for unsigned ones
+   (sign is carried by a separate bit). For ESC_HCB (11) a magnitude at or
+   above `escape-flag` collapses to `escape-flag` — the table entry says only
+   `escaped`, the real magnitude follows in the escape sequence. Throws rather
+   than silently clamping when a value does not fit the codebook, since a
+   clamp would emit audio that is not what was quantized."
+  [cb unsigned? lav v]
+  (let [m (abs- v)]
+    (cond
+      (= cb 11) (min m escape-flag)
+      (and unsigned? (<= m lav)) m
+      (and (not unsigned?) (<= (- lav) v) (<= v lav)) (+ v lav)
+      :else (throw (ex-info "aac.huffman: value out of range for this spectral codebook"
+                             {:cb cb :value v :lav lav :unsigned? unsigned?})))))
+
+(defn tuple->idx
+  "Inverse of `idx->tuple`: the Annex 4.A table index for an n-tuple of
+   quantized spectral values under codebook `cb`. Little more than reading
+   §4.6.3.3's translation formula as the base-`mod` positional number it is."
+  [cb tuple]
+  (let [{:keys [dim unsigned? lav]} (get codebook-params cb)
+        _ (when (nil? dim) (throw (ex-info "aac.huffman: unknown/unsupported spectral codebook" {:cb cb})))
+        _ (when-not (= dim (count tuple))
+            (throw (ex-info "aac.huffman: tuple length does not match codebook dimension"
+                             {:cb cb :dim dim :tuple tuple})))
+        mod- (if unsigned? (inc lav) (inc (* 2 lav)))]
+    (reduce (fn [acc v] (+ (* acc mod-) (index-digit cb unsigned? lav v))) 0 tuple)))
+
+(defn escape-bits
+  "Bit cost of ESC_HCB's `escape_sequence` for magnitude `mag` (>= 16): the
+   `N` one-bits, the zero separator, and the `N+4`-bit word — `2N+5` bits,
+   where `N` is fixed by `2^(N+4) <= mag < 2^(N+5)` (inverse of `read-escape!`)."
+  [mag]
+  (loop [n 0]
+    (if (< mag (bit-shift-left 1 (+ n 5)))
+      (+ (* 2 n) 5)
+      (recur (inc n)))))
+
+(defn codebook-fits?
+  "Can codebook `cb` code every value in `values`? Signed codebooks need
+   `|v| <= lav` with the sign IN the table index; unsigned ones need
+   `|v| <= lav` with a separate sign bit; ESC_HCB (11) takes anything up to the
+   spec's 8191 via its escape sequence."
+  [cb values]
+  (let [{:keys [lav]} (get codebook-params cb)]
+    (if (nil? lav)
+      false
+      (if (= cb 11)
+        (every? (fn [v] (<= (abs- v) 8191)) values)
+        (every? (fn [v] (<= (abs- v) lav)) values)))))
+
+(defn tuple-bits
+  "Exact bit cost of one n-tuple under codebook `cb`: the codeword, one sign
+   bit per non-zero value for unsigned codebooks, and ESC_HCB's escape
+   sequences. Exact rather than estimated because `aac.encode` compares its
+   predicted frame size against the bits actually written."
+  [cb tuple]
+  (let [{:keys [unsigned?]} (get codebook-params cb)
+        [length _] (nth (get cb-table cb) (tuple->idx cb tuple))]
+    (+ length
+       (if unsigned? (count (filter (complement zero?) tuple)) 0)
+       (if (= cb 11)
+         (reduce (fn [acc v] (let [m (abs- v)] (if (>= m escape-flag) (+ acc (escape-bits m)) acc)))
+                 0 tuple)
+         0))))
+
+(defn- write-escape!
+  "Write ESC_HCB's `escape_sequence` for magnitude `mag` — inverse of
+   `read-escape!`."
+  [w mag]
+  (let [n (loop [n 0] (if (< mag (bit-shift-left 1 (+ n 5))) n (recur (inc n))))]
+    (dotimes [_ n] (bits/write-bit! w 1))
+    (bits/write-bit! w 0)
+    (bits/write-bits! w (+ n 4) (- mag (bit-shift-left 1 (+ n 4))))))
+
+(defn write-spectral-tuple!
+  "Write one n-tuple of quantized spectral values under codebook `cb` — the
+   inverse of `decode-spectral-tuple!`, in its exact field order: codeword,
+   then ALL sign bits (unsigned codebooks, one per non-zero value), then ALL
+   escape sequences (ESC_HCB). That ordering is not a guess — it is the order
+   `decode-spectral-tuple!` reads, and that decoder is validated bit-exactly
+   against real ffmpeg-encoded streams."
+  [w cb tuple]
+  (let [{:keys [unsigned?]} (get codebook-params cb)
+        [length codeword] (nth (get cb-table cb) (tuple->idx cb tuple))]
+    (bits/write-bits! w length codeword)
+    (when unsigned?
+      (doseq [v tuple] (when-not (zero? v) (bits/write-bit! w (if (neg? v) 1 0)))))
+    (when (= cb 11)
+      (doseq [v tuple] (let [m (abs- v)] (when (>= m escape-flag) (write-escape! w m)))))
+    nil))
+
+;; --- scalefactor DPCM, encode direction --------------------------------
+
+(defn scalefactor-delta-bits
+  "Bit cost of one differential scalefactor `delta` (Table 4.A.1). Throws
+   outside the codebook's -60..60 range — `aac.quant/clamp-dpcm-chain` exists
+   to make sure that never reaches here."
+  [delta]
+  (let [idx (- delta sf-index-offset)]
+    (when (or (neg? idx) (>= idx (count tabs/sf-huffman-table)))
+      (throw (ex-info "aac.huffman: differential scalefactor out of codebook range"
+                       {:delta delta :limit 60})))
+    (first (nth tabs/sf-huffman-table idx))))
+
+(defn write-scalefactor-dpcm!
+  "Write one differential scalefactor — inverse of `decode-scalefactor-dpcm!`."
+  [w delta]
+  (let [idx (- delta sf-index-offset)
+        _ (when (or (neg? idx) (>= idx (count tabs/sf-huffman-table)))
+            (throw (ex-info "aac.huffman: differential scalefactor out of codebook range"
+                             {:delta delta :limit 60})))
+        [length codeword] (nth tabs/sf-huffman-table idx)]
+    (bits/write-bits! w length codeword)
+    nil))

@@ -13,10 +13,14 @@
    that this repo implements real sample decode, but `aac.adts` itself
    still only deals with the container-level header).
 
+   The write direction (`write-header`, plus the MPEG-4 `AudioSpecificConfig`
+   an MP4 container needs instead of ADTS headers) is at the bottom of this
+   file; `aac.encode` is what calls it.
+
    New implementation (not an extraction — utsushi.bitstream/parse-adts was
    an unimplemented TODO stub) as part of the kotoba-lang reverse-domain
    media/graphics standards-substrate split (com-junkawasaki/root)."
-  )
+  (:require [aac.bits :as bits]))
 
 (def sampling-frequencies
   "ADTS sampling_frequency_index → Hz (index 13/14 reserved, 15 = explicit
@@ -25,10 +29,6 @@
    16000 12000 11025 8000 7350 nil nil nil])
 
 (defn- u8  [b i] (bit-and (int (nth b i)) 0xff))
-(defn- bits [v hi-bit-offset-from-msb n total-bits]
-  ;; extract `n` bits from a `total-bits`-wide integer `v`, where the field
-  ;; starts `hi-bit-offset-from-msb` bits in from the MSB.
-  (bit-and (bit-shift-right v (- total-bits hi-bit-offset-from-msb n)) (dec (bit-shift-left 1 n))))
 
 (defn parse-header
   "Parse one ADTS frame header at byte offset `off` in `b` (vector of
@@ -42,8 +42,11 @@
             (not= 0xFF (u8 b off))
             (not= 0xF0 (bit-and (u8 b (+ off 1)) 0xF0)))
     (throw (ex-info "aac: bad ADTS syncword" {:off off})))
+  ;; Byte 6 (adts_buffer_fullness' low bits + number_of_raw_data_blocks) is
+  ;; read past but not surfaced — `write-header`'s field list is the layout in
+  ;; full.
   (let [b1 (u8 b (+ off 1)) b2 (u8 b (+ off 2)) b3 (u8 b (+ off 3))
-        b4 (u8 b (+ off 4)) b5 (u8 b (+ off 5)) b6 (u8 b (+ off 6))
+        b4 (u8 b (+ off 4)) b5 (u8 b (+ off 5))
         mpeg-version       (bit-and (bit-shift-right b1 3) 1)   ; 0=MPEG-4, 1=MPEG-2
         protection-absent? (= 1 (bit-and b1 1))
         profile            (inc (bit-and (bit-shift-right b2 6) 3))   ; AAC profile = coded value + 1
@@ -76,3 +79,85 @@
         (let [h (parse-header b off)]
           (recur (:end h)
                  (conj acc (assoc h :payload (subvec b (+ off (:header-length h)) (:end h))))))))))
+
+;; --- encode side (`aac.encode`, com-junkawasaki/root ADR-2800002800) -----
+
+(def aac-lc-audio-object-type
+  "MPEG-4 audioObjectType for AAC Low Complexity (§1.5.1.1 Table 1.16). ADTS's
+   own 2-bit `profile` field carries `audioObjectType - 1`, which is why
+   `parse-header` returns 2 for an AAC-LC stream and `write-header` writes 1."
+  2)
+
+(defn write-header
+  "Emit one 7-byte ADTS header — the inverse of `parse-header`. `frame-length`
+   is the TOTAL frame size including this header, as the field is defined.
+   Defaults: MPEG-4 (`:mpeg-version` 0), AAC-LC (`:profile` 2), no CRC
+   (`protection_absent` 1, hence 7 bytes and no 9-byte path), and
+   `adts_buffer_fullness` 0x7FF, the reserved 'variable rate / unknown' value
+   every real decoder accepts and which is the honest one here because
+   `aac.encode` does not model a decoder input buffer.
+
+   Emitted through `aac.bits`' writer rather than by hand-assembling six bytes
+   so that the field ORDER in this function is the same reading order
+   `parse-header` documents; `test/aac/adts_test.clj` round-trips the two."
+  [{:keys [sampling-frequency-index channel-configuration frame-length
+           mpeg-version profile]
+    :or {mpeg-version 0 profile aac-lc-audio-object-type}}]
+  (when-not (and (nat-int? frame-length) (< frame-length 8192))
+    (throw (ex-info "aac.adts: aac_frame_length must fit 13 bits"
+                     {:frame-length frame-length})))
+  (when (nil? (nth sampling-frequencies sampling-frequency-index nil))
+    (throw (ex-info "aac.adts: sampling_frequency_index has no defined rate"
+                     {:sampling-frequency-index sampling-frequency-index})))
+  (let [w (bits/writer)]
+    (bits/write-bits! w 12 0xFFF)                   ; syncword
+    (bits/write-bit! w mpeg-version)                ; ID (0 = MPEG-4)
+    (bits/write-bits! w 2 0)                        ; layer (always 00)
+    (bits/write-bit! w 1)                           ; protection_absent (no CRC)
+    (bits/write-bits! w 2 (dec profile))            ; profile = audioObjectType - 1
+    (bits/write-bits! w 4 sampling-frequency-index)
+    (bits/write-bit! w 0)                           ; private_bit
+    (bits/write-bits! w 3 channel-configuration)
+    (bits/write-bit! w 0)                           ; original/copy
+    (bits/write-bit! w 0)                           ; home
+    (bits/write-bit! w 0)                           ; copyright_identification_bit
+    (bits/write-bit! w 0)                           ; copyright_identification_start
+    (bits/write-bits! w 13 frame-length)
+    (bits/write-bits! w 11 0x7FF)                   ; adts_buffer_fullness (VBR)
+    (bits/write-bits! w 2 0)                        ; number_of_raw_data_blocks_in_frame - 1
+    (bits/bytes! w)))
+
+(def header-length
+  "Length of the header `write-header` emits (7 — `protection_absent` 1, so no
+   2-byte CRC)."
+  7)
+
+(defn audio-specific-config
+  "MPEG-4 `AudioSpecificConfig` (ISO/IEC 14496-3 §1.6.2.1) for an AAC-LC
+   stream: audioObjectType(5) samplingFrequencyIndex(4)
+   channelConfiguration(4) + GASpecificConfig's frameLengthFlag(1)
+   dependsOnCoreCoder(1) extensionFlag(1) = 16 bits, so 2 bytes.
+
+   This is NOT part of ADTS — it is the out-of-band form of the same three
+   fields, and it is what an MP4/ISOBMFF `esds` (`DecoderSpecificInfo`) needs,
+   since MP4 carries raw AAC access units with NO ADTS header at all. It lives
+   here because the fields are identical and duplicating their encoding
+   somewhere else is how the two drift apart: `aac.encode/encode-mono` returns
+   both this and the ADTS stream from the same parameters."
+  [{:keys [sampling-frequency-index channel-configuration]}]
+  (let [w (bits/writer)]
+    (bits/write-bits! w 5 aac-lc-audio-object-type)
+    (bits/write-bits! w 4 sampling-frequency-index)
+    (bits/write-bits! w 4 channel-configuration)
+    (bits/write-bit! w 0)                           ; frameLengthFlag (0 = 1024 lines)
+    (bits/write-bit! w 0)                           ; dependsOnCoreCoder
+    (bits/write-bit! w 0)                           ; extensionFlag
+    (bits/bytes! w)))
+
+(defn sampling-frequency-index
+  "`sampling_frequency_index` for `hz`, or throws — the inverse of indexing
+   `sampling-frequencies`."
+  [hz]
+  (or (first (keep-indexed (fn [i v] (when (= v hz) i)) sampling-frequencies))
+      (throw (ex-info "aac.adts: no sampling_frequency_index for this rate"
+                       {:hz hz :supported (vec (remove nil? sampling-frequencies))}))))
