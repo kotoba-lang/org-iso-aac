@@ -1,8 +1,9 @@
 # kotoba-lang/org-iso-aac
 
-Zero-dep portable `.cljc` AAC-LC (Low Complexity) decoder — ADTS (Audio
-Data Transport Stream) frame framing + real spectral-to-PCM sample decode
-— ISO/IEC 13818-7 (MPEG-2 AAC) / ISO/IEC 14496-3 (MPEG-4 AAC). Named
+Zero-dep portable `.cljc` AAC-LC (Low Complexity) **codec** — ADTS (Audio
+Data Transport Stream) frame framing, real spectral-to-PCM sample decode,
+and PCM-to-ADTS **encode** — ISO/IEC 13818-7 (MPEG-2 AAC) / ISO/IEC
+14496-3 (MPEG-4 AAC). Named
 `org-iso-aac` (ISO/IEC-numbered spec, consistent with `org-iso-h264`/
 `org-iso-isobmff`/`org-iso-jpeg`/`org-iso-pdf`/`org-iso-opentype` in the
 same batch). This is the kotoba-lang ecosystem's **first audio codec
@@ -41,6 +42,19 @@ per-format-spec repos; see `com-junkawasaki/root` ADR precedent
   block-switch to `EIGHT_SHORT_SEQUENCE`, aren't decodable — see
   `test/aac/decode_test.clj`'s docstring for how real fixtures work around
   this). Only 44100/48000 Hz sample rates.
+- **Encode** (`aac.encode` + `aac.mdct`/`aac.quant` + the write direction of
+  `aac.huffman`/`aac.adts`): PCM -> ADTS AAC-LC, mono (SCE) or stereo (CPE
+  with per-band mid/side), 44100/48000 Hz, with a bit-budget rate-control
+  loop. Same `ONLY_LONG_SEQUENCE` restriction as the decoder, which on the
+  encode side means **no block switching**: transients are not given short
+  windows, so percussive material gets pre-echo a real encoder would avoid.
+  There is also **no psychoacoustic model** — bits follow the power law's
+  own mild noise shaping plus the rate loop, not masking thresholds, so at
+  equal bitrate ffmpeg will usually sound better while scoring *worse* on
+  plain SNR. No TNS, PNS, intensity stereo, LTP, pulse coding or SBR/PS.
+  `aac.encode`'s namespace docstring states each limitation and why.
+  Also emits the 2-byte MPEG-4 `AudioSpecificConfig` an MP4/ISOBMFF `esds`
+  needs, since MP4 carries these access units without ADTS headers.
 
 ## Usage
 
@@ -63,6 +77,28 @@ per-format-spec repos; see `com-junkawasaki/root` ADR precedent
 (decode/decode-frames-stereo (subvec frames 3 14))
 ;; => {:left [...] :right [...]} (each concatenated float PCM, 1024/frame)
 ```
+
+Encoding, the other direction. PCM is on the same full-scale convention as
+`aac.decode`'s output — roughly ±32768, **not** ±1.0:
+
+```clojure
+(require '[aac.encode :as encode])
+
+(encode/encode-mono samples {:sample-rate 44100 :bitrate 128000})
+;; => {:adts [...]                    ; a complete ADTS byte stream
+;;     :access-units [[...] ...]       ; the same frames WITHOUT ADTS headers, for MP4
+;;     :audio-specific-config [0x12 0x08]   ; the 2 bytes an MP4 esds needs
+;;     :encoder-delay 1024             ; samples a decoder must discard up front
+;;     :frames 9 :bits 32810 :clipped-lines 0 :sample-rate 44100 :channels 1}
+
+(encode/encode-stereo left right {:sample-rate 44100 :bitrate 192000})
+```
+
+Options: `:bitrate` (the rate loop's target, never exceeded), or `:base-sf`
+to fix the quantizer and ignore it (constant quality instead of constant
+rate); `:window-shape` 0 sine / 1 KBD; `:noise-shaping-alpha` and
+`:rounding` (see `aac.quant` — both defaults are the ones this repo can
+defend, and `:rounding`'s was chosen by measurement, not convention).
 
 ## Validation
 
@@ -93,6 +129,32 @@ same **1 LSB** max-diff as the mono case — see
 `-aac_is 0` (disabling INTENSITY STEREO specifically, a separate
 out-of-scope tool) was additionally required beyond `-aac_pns 0`.
 
+**Encode** (`aac.encode`): the same golden-vector methodology, run in the
+other direction — this repo encodes and **real ffmpeg decodes**. There is no
+reference encoder to diff against (two conformant AAC encoders produce
+entirely different bitstreams and neither is wrong), so the claim being
+checked is the only one worth making: an independent decoder reads this
+encoder's output and recovers the audio. `ffmpeg`'s decode of the committed
+`encode-tone-{mono,stereo}.aac` fixtures agrees with this repo's own decode
+of the same bitstream to **2 LSB**, and recovers the source at **38.2 dB**
+SNR (mono, 125.6 kbit/s) / **37.9 dB** per channel (stereo, 182.5 kbit/s).
+Those fixtures deliberately mix tones with broadband dither, which is what
+holds the number down — a tones-only source reaches ~62 dB at the same rate.
+The fixtures include ffmpeg's answer so CI needs no
+ffmpeg; regenerate them with `clojure -M:fixtures` (see `aac.dev.fixtures`).
+Byte-exactness against the fixture is deliberately not asserted —
+`Math/pow`/`Math/cos` are not required to be identical across platforms, so
+that would be a portability trap rather than a correctness check; see
+`test/aac/encode_test.clj`'s docstring.
+
+The forward filterbank (`aac.mdct`) is pinned by perfect reconstruction
+rather than by a reference: `analyze-frame` -> `aac.imdct/decode-frame`
+returns the input signal to ~1e-6 absolute for both window shapes, and the
+test also asserts that it FAILS at a perturbed forward scale, so a
+self-consistent-but-wrongly-scaled transform pair could not pass. All ~1240
+Annex 4.A spectral table entries round-trip through the encode direction and
+back, with the bit cost predicted exactly.
+
 The Kaiser-Bessel Derived (KBD) window construction (`aac.imdct/kbd-window`)
 and the ~1360-row Annex 4.A Huffman codebook tables
 (`aac.huffman-tables`) were independently cross-verified against real
@@ -107,4 +169,5 @@ by eye).
 ```sh
 clojure -M:test
 clojure -M:lint
+clojure -M:fixtures   # regenerate the encode-side fixtures (needs ffmpeg)
 ```

@@ -1,12 +1,13 @@
 (ns aac.bits
-  "MSB-first bit reader over a byte vector, for the AAC raw_data_block
-   payload (ISO/IEC 14496-3 §4.4 syntax tables read every field this way —
-   `uimsbf`/`bslbf`/`vlclbf`). Pure cljc, zero dependencies. Mirrors
-   `kotoba-lang/org-iso-h264`'s `h264.expgolomb` reader shape (same
-   `reader`/`bit!`/`bits!` names and atom-based bytepos/bitpos state) for
-   consistency across this org's bitstream-format repos, minus the
-   Exp-Golomb-specific `ue!`/`se!` (AAC has no Exp-Golomb codes — its
-   variable-length fields are all Huffman, see `aac.huffman`)."
+  "MSB-first bit reader AND writer over a byte vector, for the AAC
+   raw_data_block payload (ISO/IEC 14496-3 §4.4 syntax tables read every
+   field this way — `uimsbf`/`bslbf`/`vlclbf`). Pure cljc, zero dependencies.
+   Mirrors `kotoba-lang/org-iso-h264`'s `h264.expgolomb` reader/writer shape
+   (same `reader`/`bit!`/`bits!` + `writer`/`write-bit!`/`write-bits!`/
+   `bytes!` names and atom-based state) for consistency across this org's
+   bitstream-format repos, minus the Exp-Golomb-specific `ue!`/`se!`/
+   `write-ue!`/`write-se!` (AAC has no Exp-Golomb codes — its variable-length
+   fields are all Huffman, see `aac.huffman`)."
   )
 
 (defn reader [data]
@@ -39,3 +40,45 @@
   "Total bits consumed so far (bytepos*8 + bitpos) — for diagnostics/tests."
   [r]
   (+ (* 8 @(:bytepos r)) @(:bitpos r)))
+
+;; --- encode side (`aac.encode`, com-junkawasaki/root ADR-2800002800) -----
+;; Bit writer mirroring `reader`/`bit!`/`bits!` above (and h264.expgolomb's
+;; own writer, same names): accumulates bits MSB-first into whole bytes.
+;; `bytes!` finalizes, flushing a partial byte zero-padded — which is
+;; exactly `byte_alignment()` (§4.4.2.1's `id_syn_ele == ID_END` trailer),
+;; so a raw_data_block needs no separate padding call.
+
+(defn writer []
+  {:out (atom []) :cur (atom 0) :nbits (atom 0) :written (atom 0)})
+
+(defn write-bit! [w bit]
+  (swap! (:cur w) #(bit-or (bit-shift-left % 1) (bit-and bit 1)))
+  (swap! (:nbits w) inc)
+  (swap! (:written w) inc)
+  (when (= 8 @(:nbits w))
+    (swap! (:out w) conj @(:cur w))
+    (reset! (:cur w) 0)
+    (reset! (:nbits w) 0))
+  nil)
+
+(defn write-bits!
+  "Write the low `n` bits of `v`, MSB first."
+  [w n v]
+  (dotimes [i n] (write-bit! w (bit-and (bit-shift-right v (- n i 1)) 1))))
+
+(defn bits-written
+  "Total bits written so far (NOT rounded up to a byte) — lets the encoder
+   assert its own predicted bit count against the real one (see
+   `aac.encode/frame-bits`)."
+  [w]
+  @(:written w))
+
+(defn bytes!
+  "Finalize `w` into a plain byte vector, flushing any partial byte
+   zero-padded (= `byte_alignment()`, see the comment above)."
+  [w]
+  (when (pos? @(:nbits w))
+    (swap! (:out w) conj (bit-shift-left @(:cur w) (- 8 @(:nbits w))))
+    (reset! (:cur w) 0)
+    (reset! (:nbits w) 0))
+  @(:out w))
