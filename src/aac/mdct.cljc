@@ -1,9 +1,17 @@
 (ns aac.mdct
   "AAC-LC long-window (1024-line) FORWARD MDCT + analysis windowing — the
    exact TDAC inverse of `aac.imdct/decode-frame` (ISO/IEC 14496-3:2005
-   §4.6.11 filterbank, read in the encode direction). Scope, like the
-   decoder's: `ONLY_LONG_SEQUENCE` only (no block switching — see the
-   `aac.encode` namespace docstring for what that costs on transients).
+   §4.6.11 filterbank, read in the encode direction). Scope:
+   `ONLY_LONG_SEQUENCE` only — NO block switching, unlike the DECODER, which
+   reads all four window sequences (`aac.imdct`). The asymmetry is
+   deliberate: deciding WHEN to switch is a psychoacoustic question (a
+   transient detector, which this encoder has no basis for — see the
+   `aac.encode` namespace docstring's 'no psychoacoustic model' item),
+   whereas reading a switch the encoder already made is not. The short and
+   transition windows and the window grouping an encoder-side switch would
+   need already exist in `aac.imdct`/`aac.ics`; what is missing is the
+   decision, not the filterbank. See `aac.encode` for what the gap costs on
+   transients.
 
    ## Why the forward transform carries a factor of 2
 

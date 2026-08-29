@@ -43,7 +43,7 @@
                 acc
                 (let [spec (mapv #(* spec-scale %)
                                  (mdct/analyze-frame (first bs) window-shape prev-shape))
-                      {:keys [pcm overlap]} (imdct/decode-frame spec window-shape prev-shape prev-overlap)]
+                      {:keys [pcm overlap]} (imdct/decode-frame spec imdct/only-long-sequence window-shape prev-shape prev-overlap)]
                   (recur (rest bs) window-shape overlap (into acc pcm)))))]
     (subvec out 1024)))
 
@@ -99,3 +99,36 @@
       (is (= 3 (count blocks)))                       ;; ceil(1500/1024)=2, +1 delay
       (is (>= (count recon) 1500))
       (is (< (max-abs-error samples recon 1500) 1e-6)))))
+
+;; --- the IMDCT's symmetry fold ----------------------------------------
+;;
+;; `aac.imdct/imdct` does not evaluate §4.6.11.3.1's formula the way the
+;; spec writes it: it folds the N outputs onto N/2 distinct cosine rows and
+;; indexes a shared 4N-entry cosine table (see that namespace's comment for
+;; the two identities the fold rests on). That is exact algebra, but it is
+;; algebra written by hand, so it is pinned against the literal transcription
+;; — `imdct-reference`, which is kept in the source for exactly this purpose.
+;;
+;; The two agree far below the round-off of the double arithmetic they are
+;; both made of, so the bound here is tight enough that a fold with a
+;; wrong sign, a wrong row or an off-by-one index could not slip under it:
+;; any of those changes an output by a value of the same order as the output
+;; itself. (This runs the reference form, which is 2 million cosine
+;; evaluations at N=2048 — hence one spectrum per length rather than a sweep.)
+(deftest imdct-fold-matches-reference
+  (doseq [[n label] [[2048 "long"] [256 "short"]]]
+    (testing (str label " transform: folded IMDCT == literal §4.6.11.3.1 formula")
+      (let [rng (java.util.Random. 20260829)
+            spec (vec (repeatedly (quot n 2) #(- (.nextDouble rng) 0.5)))
+            folded (imdct/imdct spec n)
+            literal (imdct/imdct-reference spec n)
+            peak (apply max (map #(Math/abs (double %)) literal))
+            err (apply max (map (fn [a b] (Math/abs (- (double a) (double b)))) folded literal))]
+        (is (pos? peak) "the reference output must be non-trivial")
+        (is (< err (* 1e-9 peak))
+            (str "max abs diff " err " against peak " peak))))))
+
+(deftest imdct-rejects-wrong-spectrum-length
+  (testing "an N/2 mismatch throws rather than reading a truncated transform"
+    (is (thrown? clojure.lang.ExceptionInfo (imdct/imdct (vec (repeat 512 0.0)) 2048)))
+    (is (thrown? clojure.lang.ExceptionInfo (imdct/imdct (vec (repeat 1024 0.0)) 256)))))

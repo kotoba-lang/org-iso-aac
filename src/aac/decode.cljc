@@ -15,13 +15,15 @@
      stereo (a per-band pseudo-codebook, not a CPE-level tool), LFE,
      coupling channels, and multi-element/program_config_element streams
      all still throw.
-   - **`ONLY_LONG_SEQUENCE` only** — `aac.ics/ics-info!` throws for
-     LONG_START/EIGHT_SHORT/LONG_STOP. In particular this means encoder
-     transient regions (attack transients almost always trigger a block
-     switch to EIGHT_SHORT) are NOT decodable by this repo — real fixtures
-     necessarily start a few frames into a stream, after the transient has
-     settled into steady-state long blocks (see `test/aac/decode_test.clj`'s
-     docstring for exactly which frame range and why).
+   - **All four `window_sequence` values** — ONLY_LONG_SEQUENCE,
+     LONG_START_SEQUENCE, EIGHT_SHORT_SEQUENCE and LONG_STOP_SEQUENCE, i.e.
+     block switching. This is what makes real encoder output decodable at
+     all: encoders switch to EIGHT_SHORT at every transient, so a stream
+     with any attack in it — which is every stream that is not a steady
+     tone — used to be undecodable from its very first frame. The
+     `test/aac/decode_test.clj` fixtures now decode from frame 0 through the
+     end of the file, transients included, rather than from a hand-picked
+     steady-state frame range.
    - **No SBR/PS** (this is plain AAC-LC, not HE-AAC/HE-AACv2), **no LTP**,
      **no predictor, pulse, TNS, or gain-control tools**, **no PNS or
      intensity stereo** (`aac.ics` throws on all of these — see that
@@ -47,7 +49,6 @@
             [aac.ics :as ics]
             [aac.dequant :as dequant]
             [aac.stereo :as stereo]
-            [aac.tables :as tables]
             [aac.imdct :as imdct]))
 
 (def ^:private id-sce 0)
@@ -137,6 +138,23 @@
         (throw (ex-info "aac.decode: unsupported syntax element (only stereo channel_pair_element is in scope for decode-adts-frame-stereo)"
                          {:id-syn-ele id-syn-ele}))))))
 
+(defn- transform-order
+  "Put a frame's dequantized spectrum into the order `aac.imdct` wants. For
+   the three long window sequences that is already the case (the 1024
+   coefficients ARE the transform's input); for EIGHT_SHORT_SEQUENCE the
+   bitstream stores them grouped (see `aac.ics`'s namespace docstring) and
+   they have to be de-interleaved into the eight 128-line blocks first.
+
+   This happens AFTER dequantization and AFTER mid/side reconstruction, not
+   before: scalefactors and `ms_used` are both indexed by (window group,
+   band), so both of those steps want the grouped order — and both channels
+   of a CPE share one `ics_info()`, so they are grouped identically and M/S
+   pairs line for line."
+  [spec sfi window-sequence window-group-lengths]
+  (if (= window-sequence imdct/eight-short-sequence)
+    (ics/deinterleave-short-spectrum spec sfi window-group-lengths)
+    spec))
+
 (defn decode-adts-frame
   "Decode one ADTS frame (as produced by `aac.adts/frames`/`parse-header`)
    to 1024 PCM samples (floats — see `aac.decode/pcm->int16` for s16
@@ -144,17 +162,28 @@
    filterbank state from the previous frame in the stream (use
    `aac.imdct/zero-overlap` and any `window-shape` — it's multiplied by
    an all-zero `prev-overlap` so its value is irrelevant — for the first
-   frame). Returns {:pcm [1024 floats] :window-shape :overlap} — the last
-   two are this frame's own window_shape/second-half-overlap, to pass as
-   `prev-window-shape`/`prev-overlap` for the NEXT frame."
+   frame). Returns {:pcm [1024 floats] :window-sequence
+   :window-group-lengths :window-shape :overlap} —
+   `:window-shape`/`:overlap` are this frame's own, to pass as
+   `prev-window-shape`/`prev-overlap` for the NEXT frame; `:window-sequence`
+   and `:window-group-lengths` are reported so a caller can tell whether the
+   encoder block-switched here, and how it grouped the eight short windows
+   (`test/aac/decode_test.clj` uses it to assert that a fixture really does
+   contain the window sequences its test claims to exercise — a block
+   switching test whose fixture had drifted to long blocks only would
+   otherwise pass while testing nothing)."
   [frame prev-window-shape prev-overlap]
   (let [r (bits/reader (:payload frame))
         sfi (:sampling-frequency-index frame)
-        {:keys [window-shape sfb-cb scale-factors coeffs]} (decode-raw-data-block! r sfi)
-        swb-offsets (tables/swb-offsets sfi)
-        spec (dequant/dequantize coeffs sfb-cb scale-factors swb-offsets)
-        {:keys [pcm overlap]} (imdct/decode-frame spec window-shape prev-window-shape prev-overlap)]
-    {:pcm pcm :window-shape window-shape :overlap overlap}))
+        {:keys [window-sequence window-shape window-group-lengths band-ranges
+                sfb-cb scale-factors coeffs]}
+        (decode-raw-data-block! r sfi)
+        spec (-> (dequant/dequantize coeffs sfb-cb scale-factors band-ranges)
+                 (transform-order sfi window-sequence window-group-lengths))
+        {:keys [pcm overlap]} (imdct/decode-frame spec window-sequence window-shape
+                                                  prev-window-shape prev-overlap)]
+    {:pcm pcm :window-sequence window-sequence :window-group-lengths window-group-lengths
+     :window-shape window-shape :overlap overlap}))
 
 (defn decode-frames
   "Decode a sequence of consecutive `aac.adts/frames` entries (already
@@ -196,24 +225,34 @@
    dequantize` independently per channel (channel-local scalefactors/
    codebooks) -> `aac.stereo/apply-ms` (cross-channel M/S reconstruction,
    using the pair's shared `:ms-mask` — a no-op pass-through when
-   `common_window`==0 or `ms_mask_present`==0) -> `aac.imdct/decode-frame`
+   `common_window`==0 or `ms_mask_present`==0) -> `transform-order`
+   (de-interleave, EIGHT_SHORT_SEQUENCE only) -> `aac.imdct/decode-frame`
    independently per channel.
 
-   Returns {:pcm-l :pcm-r [1024 floats each] :window-shape-l :window-shape-r
-   :overlap-l :overlap-r} — the last four, to pass as this same frame's
+   Returns {:pcm-l :pcm-r [1024 floats each] :window-sequence-l
+   :window-sequence-r :window-group-lengths-l :window-group-lengths-r
+   :window-shape-l :window-shape-r :overlap-l :overlap-r} — the
+   shape/overlap pairs are to pass as this same frame's
    `prev-*` for the NEXT frame (mirrors `decode-adts-frame`'s single-channel
-   contract)."
+   contract); the window sequences are reported for the same reason as in
+   the mono case. Under `common_window`==1 the two are necessarily equal
+   (one shared `ics_info()`); they can differ only when
+   `common_window`==0."
   [frame prev-window-shape-l prev-overlap-l prev-window-shape-r prev-overlap-r]
   (let [r (bits/reader (:payload frame))
         sfi (:sampling-frequency-index frame)
         {:keys [ch0 ch1 ms-mask]} (decode-raw-data-block-cpe! r sfi)
-        swb-offsets (tables/swb-offsets sfi)
-        spec0 (dequant/dequantize (:coeffs ch0) (:sfb-cb ch0) (:scale-factors ch0) swb-offsets)
-        spec1 (dequant/dequantize (:coeffs ch1) (:sfb-cb ch1) (:scale-factors ch1) swb-offsets)
-        [spec-l spec-r] (stereo/apply-ms spec0 spec1 ms-mask swb-offsets)
-        {pcm-l :pcm overlap-l :overlap} (imdct/decode-frame spec-l (:window-shape ch0) prev-window-shape-l prev-overlap-l)
-        {pcm-r :pcm overlap-r :overlap} (imdct/decode-frame spec-r (:window-shape ch1) prev-window-shape-r prev-overlap-r)]
+        spec0 (dequant/dequantize (:coeffs ch0) (:sfb-cb ch0) (:scale-factors ch0) (:band-ranges ch0))
+        spec1 (dequant/dequantize (:coeffs ch1) (:sfb-cb ch1) (:scale-factors ch1) (:band-ranges ch1))
+        [ms-l ms-r] (stereo/apply-ms spec0 spec1 ms-mask (:band-ranges ch0))
+        spec-l (transform-order ms-l sfi (:window-sequence ch0) (:window-group-lengths ch0))
+        spec-r (transform-order ms-r sfi (:window-sequence ch1) (:window-group-lengths ch1))
+        {pcm-l :pcm overlap-l :overlap} (imdct/decode-frame spec-l (:window-sequence ch0) (:window-shape ch0) prev-window-shape-l prev-overlap-l)
+        {pcm-r :pcm overlap-r :overlap} (imdct/decode-frame spec-r (:window-sequence ch1) (:window-shape ch1) prev-window-shape-r prev-overlap-r)]
     {:pcm-l pcm-l :pcm-r pcm-r
+     :window-sequence-l (:window-sequence ch0) :window-sequence-r (:window-sequence ch1)
+     :window-group-lengths-l (:window-group-lengths ch0)
+     :window-group-lengths-r (:window-group-lengths ch1)
      :window-shape-l (:window-shape ch0) :window-shape-r (:window-shape ch1)
      :overlap-l overlap-l :overlap-r overlap-r}))
 

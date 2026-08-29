@@ -44,28 +44,33 @@
 (defn apply-ms
   "Reconstruct [left right] (each a full-length dequantized spectrum vector)
    from `spec0`/`spec1` (`aac.dequant/dequantize`'s per-channel output — the
-   pair's two channels AS CODED: mid/side for any scalefactor band with
-   `ms_used`==1, plain L/R otherwise) and `ms-mask` (`aac.ics/ms-mask!`'s
-   boolean-vector-or-nil result, length = the pair's SHARED `max-sfb`) +
-   `swb-offsets` (`aac.tables/swb-offsets`, mapping each `sfb` to its
-   [start,end) coefficient-index range). `ms-mask` nil (no M/S in this
-   frame — including whenever `common_window`==0, since M/S requires a
-   shared window) short-circuits to `[spec0 spec1]` unchanged (already
-   plain L/R). See namespace docstring for the per-band formula and its
-   FFmpeg cross-check."
-  [spec0 spec1 ms-mask swb-offsets]
+   pair's two channels AS CODED: mid/side wherever `ms_used`==1, plain L/R
+   otherwise) and `ms-mask` (`aac.ics/ms-mask!`'s boolean-vector-or-nil
+   result) + `band-ranges` (`aac.ics/band-ranges`, giving each entry its
+   [start,end) coefficient-index range). Both are indexed identically: one
+   entry per scalefactor band for a long window_sequence, one per (window
+   group, band) pair for EIGHT_SHORT_SEQUENCE — M/S is decided per group
+   per band there, exactly as it is per band for a long window, so this
+   function needs no window-sequence knowledge (nor does it care that both
+   channels are still in the bitstream's grouped order at this
+   point: the pair shares one `ics_info()`, hence one grouping, so the two
+   are laid out identically and the reconstruction is line-for-line either
+   way). `ms-mask` nil (no M/S in this frame — including whenever
+   `common_window`==0, since M/S requires a shared window) short-circuits to
+   `[spec0 spec1]` unchanged (already plain L/R). See namespace docstring
+   for the per-band formula and its FFmpeg cross-check."
+  [spec0 spec1 ms-mask band-ranges]
   (if (nil? ms-mask)
     [spec0 spec1]
-    (let [max-sfb (count ms-mask)]
-      (loop [sfb 0 l spec0 r spec1]
-        (if (>= sfb max-sfb)
+    (let [n-bands (count ms-mask)]
+      (loop [i 0 l spec0 r spec1]
+        (if (>= i n-bands)
           [l r]
-          (if (nth ms-mask sfb)
-            (let [start (nth swb-offsets sfb)
-                  end (nth swb-offsets (inc sfb))
-                  [l' r'] (reduce (fn [[l r] i]
-                                    (let [mid (nth l i) side (nth r i)]
-                                      [(assoc l i (+ mid side)) (assoc r i (- mid side))]))
+          (if (nth ms-mask i)
+            (let [[start end] (nth band-ranges i)
+                  [l' r'] (reduce (fn [[l r] j]
+                                    (let [mid (nth l j) side (nth r j)]
+                                      [(assoc l j (+ mid side)) (assoc r j (- mid side))]))
                                   [l r] (range start end))]
-              (recur (inc sfb) l' r'))
-            (recur (inc sfb) l r)))))))
+              (recur (inc i) l' r'))
+            (recur (inc i) l r)))))))
