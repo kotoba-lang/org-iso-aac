@@ -53,6 +53,7 @@
             [aac.dequant :as dequant]
             [aac.encode :as encode]
             [aac.huffman :as huffman]
+            [aac.ics :as ics]
             [aac.huffman-tables :as tabs]
             [aac.mdct :as mdct]
             [aac.quant :as quant]
@@ -453,7 +454,11 @@
       (is (some false? ms-used)))
     (testing "apply-ms-forward is exactly inverted by the decoder's aac.stereo/apply-ms"
       (let [[ch0 ch1] (encode/apply-ms-forward spec-l spec-r ms-used swb)
-            [back-l back-r] (stereo/apply-ms ch0 ch1 (vec ms-used) swb)
+            ;; the decoder addresses bands by [start end) range rather than by
+            ;; swb_offset index (so the same code serves EIGHT_SHORT's per-group
+            ;; bands) — for a long window_sequence that is exactly `swb`'s pairs.
+            [back-l back-r] (stereo/apply-ms ch0 ch1 (vec ms-used)
+                                             (ics/band-ranges 4 0 49 [1]))
             worst (apply max (map (fn [i] (max (Math/abs (- (nth spec-l i) (nth back-l i)))
                                                (Math/abs (- (nth spec-r i) (nth back-r i)))))
                                   (range 1024)))]

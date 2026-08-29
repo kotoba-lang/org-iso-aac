@@ -35,23 +35,27 @@
       (if (neg? x-quant) (- v) v))))
 
 (defn dequantize
-  "Dequantize a full 1024-length `coeffs` vector using `sfb-cb`/`scale-factors`
-   (per `aac.ics/decode-individual-channel-stream!`) and `swb-offsets`
-   (`aac.tables/swb-offsets`) to map each coefficient bin to its scalefactor
-   band. Bands coded with ZERO_HCB are left as 0.0 (their scale-factors
-   entry is a meaningless placeholder, per `aac.ics/scale-factor-data!`)."
-  [coeffs sfb-cb scale-factors swb-offsets]
-  (let [max-sfb (count sfb-cb)
+  "Dequantize a full 1024-length `coeffs` vector using `sfb-cb`/
+   `scale-factors`/`band-ranges` (all three from
+   `aac.ics/decode-individual-channel-stream!`, all indexed identically —
+   one entry per scalefactor band for a long window_sequence, one per
+   (window group, band) pair for EIGHT_SHORT_SEQUENCE; `band-ranges` gives
+   each entry its `[start end)` coefficient range, so this function needs no
+   knowledge of window grouping at all). Entries coded with ZERO_HCB are
+   left as 0.0 (their scale-factors entry is a meaningless placeholder, per
+   `aac.ics/scale-factor-data!`), as is anything outside every range (the
+   coefficients at and above `max_sfb`)."
+  [coeffs sfb-cb scale-factors band-ranges]
+  (let [n-bands (count sfb-cb)
         n (count coeffs)]
-    (loop [sfb 0 out (vec (repeat n 0.0))]
-      (if (>= sfb max-sfb)
+    (loop [i 0 out (vec (repeat n 0.0))]
+      (if (>= i n-bands)
         out
-        (let [cb (nth sfb-cb sfb)]
+        (let [cb (nth sfb-cb i)]
           (if (zero? cb)
-            (recur (inc sfb) out)
-            (let [start (nth swb-offsets sfb)
-                  end (nth swb-offsets (inc sfb))
-                  sf (nth scale-factors sfb)
-                  out (reduce (fn [o i] (assoc o i (dequantize-coeff (nth coeffs i) sf)))
+            (recur (inc i) out)
+            (let [[start end] (nth band-ranges i)
+                  sf (nth scale-factors i)
+                  out (reduce (fn [o j] (assoc o j (dequantize-coeff (nth coeffs j) sf)))
                                out (range start end))]
-              (recur (inc sfb) out))))))))
+              (recur (inc i) out))))))))

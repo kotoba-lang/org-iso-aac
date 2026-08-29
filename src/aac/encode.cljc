@@ -25,6 +25,11 @@
      bitrate in a way that is audible, not merely measurable. Steady material
      (speech, sustained tones, synthesised narration/BGM — what
      ADR-2800002800's consumer actually feeds it) is where it is fine.
+     Note this is now an ENCODER-only limit: the decoder reads all four
+     window sequences (`aac.imdct`/`aac.ics`), so the short/transition
+     windows and window grouping already exist. Closing it here needs a
+     transient detector and a switching decision — i.e. the psychoacoustic
+     model listed next — not more filterbank.
    - **No psychoacoustic model.** Bits are allocated by the power law's own
      mild shaping (`aac.quant`'s alpha = 1/4 default) and a rate loop, not by
      masking thresholds. At equal bitrate ffmpeg will usually sound better

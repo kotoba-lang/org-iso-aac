@@ -3,81 +3,89 @@
    codec sample-decode implementation — previously only ADTS framing
    existed, see `aac.adts`'s namespace docstring).
 
-   ## `tone1000-nopns.aac` — the real, non-trivial fixture
+   ## Methodology
 
-   A REAL `ffmpeg`(native `aac` encoder)-encoded ADTS stream:
+   Every fixture here is a REAL `ffmpeg` (native `aac` encoder)-encoded ADTS
+   stream, and the reference PCM every test compares against is **ffmpeg
+   decoding its OWN encode** — the same golden-vector methodology this org's
+   sibling repos use (e.g. `org-iso-h264`'s `decode_test.clj`, and
+   `kotoba-lang/utsushi`'s `mp4_h264_test.clj`: encode with the real tool,
+   decode with the real tool, diff against that). Reference PCM is committed
+   alongside each fixture so CI needs no ffmpeg; the exact commands are in
+   each fixture's comment below.
 
-     ffmpeg -f lavfi -i \"sine=frequency=1000:duration=0.35:sample_rate=44100\" \\
-       -ac 1 -c:a aac -aac_pns 0 -b:a 96k tone1000-nopns.aac
+   All fixtures are encoded with `-aac_pns 0` and `-aac_tns 0` (stereo ones
+   additionally with `-aac_is 0`) — Perceptual Noise Substitution, Temporal
+   Noise Shaping and Intensity Stereo are all on by default in ffmpeg's
+   encoder and all three are out of this repo's scope (`aac.ics` throws on
+   each rather than mis-decoding). PNS additionally could not be
+   golden-vector-tested even if it were implemented: the spec mandates only
+   a PNS band's target ENERGY, not a noise generator, so two conformant
+   decoders legitimately produce different samples there.
 
-   `-aac_pns 0` disables Perceptual Noise Substitution — verified during
-   development that ffmpeg's encoder uses PNS (codebook 13/NOISE_HCB) for
-   at least some scalefactor band in NEARLY EVERY real frame otherwise
-   (probed via a throwaway script decoding `section_data()`/
-   `scale_factor_data()` only). PNS is out of this repo's scope (see
-   `aac.ics`'s namespace docstring) AND is fundamentally not bit-comparable
-   across independent decoders even if implemented (the spec doesn't
-   mandate a specific noise generator) — `-aac_pns 0` avoids the issue
-   entirely rather than papering over it with a tolerance that would hide
-   real bugs elsewhere.
+   ## Tolerance: 2 LSB of a 16-bit sample, and why
 
-   Frames 3-13 of this file (11 frames) are `ONLY_LONG_SEQUENCE` with
-   `window_shape` 1 (KBD) throughout, no pulse/TNS/gain-control/PNS/
-   intensity-stereo, using spectral codebooks 2-11 across various
-   scalefactor bands (real, non-trivial spectral data — this is NOT a
-   silent/near-empty frame, see `silence-golden-vector` below for that
-   simpler case) — frames 0-2 are LONG_START/EIGHT_SHORT/LONG_STOP (the
-   encoder's onset transient response to the sine wave starting abruptly
-   from silence) and frame 14 onward transitions back out of
-   ONLY_LONG_SEQUENCE; both are out of this repo's `ONLY_LONG_SEQUENCE`-only
-   scope (`aac.ics/ics-info!` throws on them), which is WHY frames 3-13 are
-   the ones this repo can decode at all — a real fixture necessarily starts
-   a few frames into any stream that has an onset.
+   AAC decoding is not bit-exact across implementations. The IMDCT,
+   windowing and the `x^(4/3)` inverse quantizer are floating point, and
+   this repo computes them in double precision while ffmpeg's native
+   encoder and decoder use 32-bit `float` internally, so the two can differ
+   in the last bit of a 16-bit sample. **Max diff actually observed across
+   every frame of every fixture in this file is 1 LSB**, most samples being
+   bit-exact; the asserted bound is 2 so that a platform whose `Math/cos` or
+   `Math/pow` rounds one ulp differently does not make the suite flaky.
 
-   Reference PCM: `ffmpeg -i tone1000-nopns.aac -f s16le -ar 44100 -ac 1
-   tone1000-nopns.ref.pcm` (ffmpeg decoding its OWN encode — the standard
-   golden-vector methodology this org's sibling repos use, e.g.
-   `org-iso-h264`'s `decode_test.clj`).
+   Two LSB out of a signal whose peak is ~10000-30000 is about -80 dB, so
+   this is not a tolerance that could absorb a decode bug: getting a window
+   sequence, a scalefactor band boundary, a window grouping or an
+   overlap-add offset wrong is a whole-frame, thousands-of-LSB error, not a
+   rounding one. That was checked rather than assumed — see `## The tests
+   discriminate` below.
 
-   ## Why frame 3's OWN decoded output is excluded from the comparison
+   ## Block switching
 
-   AAC's IMDCT filterbank is 50%-overlap-add: frame N's final output
-   depends on frame (N-1)'s second-half-windowed transform too
-   (`aac.imdct/decode-frame`'s `prev-overlap`). Frame 2 (LONG_STOP_SEQUENCE)
-   is out of scope, so this repo cold-starts (`aac.imdct/zero-overlap`) at
-   frame 3 instead of carrying frame 2's real windowed history forward —
-   frame 3's OWN PCM output is therefore wrong (missing that real overlap
-   contribution) but its window_shape/overlap STATE SAVED FOR THE NEXT
-   FRAME is computed independent of the input overlap (only frame 3's
-   *output*, not what it hands forward, is affected) — so frame 4 onward
-   is fully self-consistent and bit-comparable. `aac.decode/decode-frames`'s
-   own docstring documents this same caveat generally for any mid-stream
-   frame slice.
+   Real encoders switch from `ONLY_LONG_SEQUENCE` to `EIGHT_SHORT_SEQUENCE`
+   at every transient (bridged by `LONG_START_SEQUENCE` and
+   `LONG_STOP_SEQUENCE` on either side), so any stream that is not a steady
+   tone contains all four sequences. `blockswitch-mono-nopns.aac` and
+   `blockswitch-stereo-nopns.aac` below are built around a deliberate click
+   in the middle of a tone precisely to force that, and their tests
+   ASSERT that the fixture really does contain all four sequences and a
+   non-trivial window grouping before comparing any PCM — a block-switching
+   test whose fixture had drifted to long blocks only would otherwise pass
+   while exercising nothing.
 
-   ## Tolerance
+   Every fixture in this file is decoded from frame 0 to the end of the
+   file. There is no cold-start caveat and no hand-picked steady-state frame
+   range: this repo now decodes the same frames a real decoder does, from
+   the same zero overlap history (§4.6.11.3.1's implicit zero history at
+   stream start), which is why frame 0 is compared like any other.
 
-   Max diff observed across all 10 compared frames (4-13, 10240 samples)
-   is **1 least-significant-bit** of a 16-bit PCM sample (most samples are
-   bit-exact, `0` diff) — floating-point IMDCT/window rounding, not a
-   decode bug (this repo's IMDCT/dequantization/windowing are all
-   double-precision float; ffmpeg's native encoder+decoder use `float`
-   (32-bit) internally, so the two implementations' rounding at the very
-   last bit of a 16-bit sample can occasionally differ by one). This is
-   the same 'few-ULP tolerance for floating-point transform paths'
-   methodology `kasane`'s JPEG DCT tests use, restated here for PCM: an
-   allowed max-abs-diff of 2 LSB (looser than the actually-observed 1, to
-   avoid a flaky test) rather than requiring literal bit-exactness."
+   ## The tests discriminate
+
+   The tolerance and the fixture-content assertions were both checked by
+   breaking the implementation on purpose and confirming the tests go red:
+
+   - dropping `LONG_START_SEQUENCE`'s transition shaping (windowing its
+     right half as a full long falling window, i.e. decoding it as though it
+     were ONLY_LONG): **12 failures across 4 tests, worst diff 6087 LSB**.
+   - skipping the EIGHT_SHORT de-interleave (`aac.ics/
+     deinterleave-short-spectrum`), so the eight short blocks are
+     transformed straight from the bitstream's grouped coefficient order:
+     **24 failures across 4 tests, worst diff 35468 LSB**.
+
+   Both breaks leave `silence-golden-vector` and the side-info unit tests
+   below passing, which is the right selectivity — a silent stream has no
+   transient to block-switch on. Note that both also fail the two OLDER
+   fixtures, not just the new ones: a sine starting abruptly from silence is
+   itself a transient, so `tone1000-nopns.aac` and
+   `stereo-440-880-nopns.aac` block-switch at their own stream onset."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [aac.adts :as adts]
             [aac.decode :as decode]
+            [aac.ics :as ics]
             [aac.imdct :as imdct]
-            [aac.stereo :as stereo]
-            [aac.tables :as tables]))
-
-;; See `stereo-golden-vector` below (bottom of this file) for the STEREO
-;; (channel_pair_element, mid/side) golden-vector test and its own
-;; methodology docstring.
+            [aac.stereo :as stereo]))
 
 (defn- rd-bytes [p]
   (mapv #(bit-and (int %) 0xff)
@@ -92,176 +100,341 @@
               (short (bit-or lo (bit-shift-left hi 8)))))
           (range n))))
 
-(defn- decode-frame-range
-  "Decode `frames[start,end)` (a sub-sequence of `aac.adts/frames`'
-   output) cold-started at `start`, returning a vector of per-frame
-   {:pcm [1024 floats]}."
-  [frames start end]
-  (loop [fs (subvec frames start end) prev-shape 0 prev-overlap imdct/zero-overlap acc []]
-    (if (empty? fs)
-      acc
-      (let [{:keys [pcm window-shape overlap]} (decode/decode-adts-frame (first fs) prev-shape prev-overlap)]
-        (recur (rest fs) window-shape overlap (conj acc pcm))))))
-
-(deftest tone1000-golden-vector
-  (let [bytes (rd-bytes "aac/fixtures/tone1000-nopns.aac")
-        frames (adts/frames bytes)
-        ref (rd-pcm-s16le "aac/fixtures/tone1000-nopns.ref.pcm")
-        decoded (decode-frame-range frames 3 14)] ;; frames 3..13 inclusive
-    (testing "11 frames decoded (3..13), all ONLY_LONG_SEQUENCE"
-      (is (= 11 (count decoded))))
-    (testing "frames 4..13 (skipping frame 3's own output, see namespace docstring) match real ffmpeg PCM within 2 LSB"
-      (doseq [i (range 1 (count decoded))]
-        (let [pcm (nth decoded i)
-              overall-frame-idx (+ 3 i)
-              ref-start (* overall-frame-idx 1024)
-              ref-slice (subvec ref ref-start (+ ref-start 1024))
-              pcm-int16 (mapv decode/pcm->int16 pcm)
-              max-diff (apply max (map (fn [a b] (abs (- (int a) (int b)))) pcm-int16 ref-slice))]
-          (is (<= max-diff 2) (str "frame " overall-frame-idx " max-diff " max-diff)))))
-    (testing "sanity: the decoded tone is non-silent (real spectral data was actually decoded, not accidentally all-zero)"
-      (is (> (apply max (map (fn [x] (abs (int x))) (mapv decode/pcm->int16 (nth decoded 1)))) 1000)))))
-
-(deftest silence-golden-vector
-  (let [bytes (rd-bytes "aac/fixtures/silence.aac")
-        frames (adts/frames bytes)
-        ref (rd-pcm-s16le "aac/fixtures/silence.ref.pcm")]
-    (testing "all frames are ONLY_LONG_SEQUENCE with max_sfb=0 (no sections at all — the simplest possible legal ICS)"
-      (let [decoded (decode-frame-range frames 0 (count frames))]
-        (is (= (count frames) (count decoded)))
-        (testing "silent input decodes to (near-)silent PCM, matching ffmpeg's own silent decode"
-          (doseq [i (range (count decoded))]
-            (let [pcm-int16 (mapv decode/pcm->int16 (nth decoded i))
-                  ref-slice (subvec ref (* i 1024) (* (inc i) 1024))
-                  max-diff (apply max (map (fn [a b] (abs (- (int a) (int b)))) pcm-int16 ref-slice))]
-              (is (<= max-diff 2) (str "frame " i " max-diff " max-diff)))))))))
-
-(deftest unsupported-window-sequence-throws
-  (testing "EIGHT_SHORT_SEQUENCE / LONG_START / LONG_STOP throw rather than mis-decode"
-    (let [bytes (rd-bytes "aac/fixtures/tone1000-nopns.aac")
-          frames (adts/frames bytes)]
-      ;; frame 0 is LONG_START_SEQUENCE, frame 1 is EIGHT_SHORT_SEQUENCE
-      (is (thrown? clojure.lang.ExceptionInfo (decode/decode-adts-frame (nth frames 0) 0 imdct/zero-overlap)))
-      (is (thrown? clojure.lang.ExceptionInfo (decode/decode-adts-frame (nth frames 1) 0 imdct/zero-overlap))))))
-
-;; --- STEREO (channel_pair_element, mid/side) --------------------------
-
 (defn- rd-pcm-s16le-stereo
   "Read interleaved (L,R,L,R,...) 16-bit PCM -> {:left [...] :right [...]}
    (deinterleaved, so each channel can be compared against this decoder's
    own per-channel output the same way `rd-pcm-s16le` feeds the mono test)."
   [p]
-  (let [bytes (with-open [in (io/input-stream (io/resource p))] (.readAllBytes in))
-        n-frames (quot (quot (count bytes) 2) 2)]
-    (loop [i 0 left [] right []]
-      (if (>= i n-frames)
-        {:left left :right right}
-        (let [lo-l (bit-and (int (aget bytes (* 4 i))) 0xff)
-              hi-l (aget bytes (inc (* 4 i)))
-              lo-r (bit-and (int (aget bytes (+ 2 (* 4 i)))) 0xff)
-              hi-r (aget bytes (+ 3 (* 4 i)))]
-          (recur (inc i)
-                 (conj left (short (bit-or lo-l (bit-shift-left hi-l 8))))
-                 (conj right (short (bit-or lo-r (bit-shift-left hi-r 8))))))))))
+  (let [xs (rd-pcm-s16le p)]
+    {:left (vec (take-nth 2 xs)) :right (vec (take-nth 2 (rest xs)))}))
 
-(defn- decode-frame-range-stereo
-  "Like `decode-frame-range` but for `aac.decode/decode-adts-frame-stereo`
-   — cold-starts BOTH channels' filterbank state independently at `start`,
-   returning a vector of per-frame [pcm-l pcm-r] pairs."
-  [frames start end]
-  (loop [fs (subvec frames start end)
+(defn- max-diff [a b]
+  (apply max (map (fn [x y] (abs (- (int x) (int y)))) a b)))
+
+(defn- decode-all
+  "Decode every frame of `frames` from a cold start, returning one map per
+   frame: {:pcm [1024 int16] :window-sequence :window-group-lengths}."
+  [frames]
+  (loop [fs frames prev-shape 0 prev-overlap imdct/zero-overlap acc []]
+    (if (empty? fs)
+      acc
+      (let [{:keys [pcm window-sequence window-group-lengths window-shape overlap]}
+            (decode/decode-adts-frame (first fs) prev-shape prev-overlap)]
+        (recur (rest fs) window-shape overlap
+               (conj acc {:pcm (mapv decode/pcm->int16 pcm)
+                          :window-sequence window-sequence
+                          :window-group-lengths window-group-lengths}))))))
+
+(defn- decode-all-stereo
+  "Like `decode-all` but for `decode-adts-frame-stereo` — cold-starts BOTH
+   channels' filterbank state independently (see that function's docstring
+   for why overlap-add history is never shared across channels)."
+  [frames]
+  (loop [fs frames
          shape-l 0 ov-l imdct/zero-overlap
          shape-r 0 ov-r imdct/zero-overlap
          acc []]
     (if (empty? fs)
       acc
-      (let [{:keys [pcm-l pcm-r window-shape-l window-shape-r overlap-l overlap-r]}
+      (let [{:keys [pcm-l pcm-r window-sequence-l window-sequence-r
+                    window-group-lengths-l window-shape-l window-shape-r
+                    overlap-l overlap-r]}
             (decode/decode-adts-frame-stereo (first fs) shape-l ov-l shape-r ov-r)]
         (recur (rest fs) window-shape-l overlap-l window-shape-r overlap-r
-               (conj acc [pcm-l pcm-r]))))))
+               (conj acc {:left (mapv decode/pcm->int16 pcm-l)
+                          :right (mapv decode/pcm->int16 pcm-r)
+                          :window-sequence window-sequence-l
+                          :window-sequence-r window-sequence-r
+                          :window-group-lengths window-group-lengths-l}))))))
 
-;; STEREO golden-vector test — `stereo-440-880-nopns.aac`, a REAL
-;; `ffmpeg`(native `aac` encoder)-encoded STEREO ADTS stream with two
-;; channel-distinguishable tones (left 440 Hz / right 880 Hz), so a channel
-;; swap or cross-channel mixup bug would show up as a frequency mismatch,
-;; not just a numeric one:
+(defn- compare-mono!
+  "Assert every decoded frame matches `ref` (ffmpeg's own decode of the same
+   file) within `tol` LSB."
+  [decoded ref tol label]
+  (doseq [[i {:keys [pcm]}] (map-indexed vector decoded)]
+    (let [d (max-diff pcm (subvec ref (* i 1024) (* (inc i) 1024)))]
+      (is (<= d tol) (str label " frame " i " max-diff " d)))))
+
+;; --- window-sequence coverage assertions ------------------------------
+
+(def ^:private only-long 0)
+(def ^:private long-start 1)
+(def ^:private eight-short 2)
+(def ^:private long-stop 3)
+
+(defn- assert-block-switching!
+  "Assert `decoded` really exercises block switching, so a golden-vector
+   comparison over it cannot pass without any of the block-switching code
+   having run. Checks (a) all four window_sequence values occur, (b) at
+   least two EIGHT_SHORT frames, and (c) at least one of them uses a
+   NON-TRIVIAL window grouping — more than one group but fewer than eight,
+   i.e. `scale_factor_grouping` actually merged some windows and split
+   others, which is the case that distinguishes a correct
+   `aac.ics/window-group-lengths`/`band-ranges`/`deinterleave-short-spectrum`
+   from one that only happens to work for 1x8 or 8x1."
+  [decoded label]
+  (let [seqs (map :window-sequence decoded)
+        shorts (filter #(= eight-short (:window-sequence %)) decoded)]
+    (testing (str label " really contains block switching")
+      (is (= #{only-long long-start eight-short long-stop} (set seqs))
+          (str "expected all four window sequences, saw " (sort (set seqs))))
+      (is (<= 2 (count shorts))
+          (str "expected at least 2 EIGHT_SHORT frames, saw " (count shorts)))
+      (is (every? #(= 8 (reduce + (:window-group-lengths %))) shorts)
+          "every EIGHT_SHORT frame's window group lengths must sum to 8")
+      (is (some #(< 1 (count (:window-group-lengths %)) 8) shorts)
+          (str "expected a non-trivial window grouping, saw "
+               (vec (distinct (map :window-group-lengths shorts))))))))
+
+;; --- blockswitch-mono-nopns.aac ---------------------------------------
+;;
+;; A 1 kHz tone with a ~9-sample click dropped into the MIDDLE of it, which
+;; is what forces the encoder to block-switch somewhere other than the
+;; stream onset — so the LONG_START/EIGHT_SHORT/LONG_STOP run is entered
+;; and left with real, non-zero overlap-add history on both sides:
+;;
+;;   ffmpeg -f lavfi \
+;;     -i "aevalsrc='0.3*sin(2*PI*1000*t)+0.9*between(t,0.25,0.2502)':s=44100:d=0.5" \
+;;     -ac 1 -c:a aac -aac_pns 0 -aac_tns 0 -b:a 96k blockswitch-mono-nopns.aac
+;;   ffmpeg -i blockswitch-mono-nopns.aac -f s16le -ar 44100 -ac 1 \
+;;     blockswitch-mono-nopns.ref.pcm
+;;
+;; As encoded by ffmpeg 8.1.1 this is 23 frames: the stream-onset transient
+;; at frames 0-2 (LONG_START / EIGHT_SHORT / LONG_STOP) and the click's at
+;; frames 10-12, with ONLY_LONG everywhere else. Both EIGHT_SHORT frames
+;; carry a genuinely mixed `scale_factor_grouping` (group lengths [1 3 3 1]
+;; and [1 1 3 3]) rather than one group of eight or eight of one — the
+;; observed values are recorded here for orientation, but the test asserts
+;; the STRUCTURAL property (see `assert-block-switching!`) so that
+;; regenerating the fixture with a different encoder build cannot silently
+;; turn this into a long-blocks-only test.
+(deftest blockswitch-mono-golden-vector
+  (let [frames (adts/frames (rd-bytes "aac/fixtures/blockswitch-mono-nopns.aac"))
+        ref (rd-pcm-s16le "aac/fixtures/blockswitch-mono-nopns.ref.pcm")
+        decoded (decode-all frames)]
+    (is (= (count frames) (count decoded)))
+    (is (= (* 1024 (count frames)) (count ref)))
+    (assert-block-switching! decoded "blockswitch-mono")
+    (testing "every frame matches real ffmpeg PCM within 2 LSB, transients included"
+      (compare-mono! decoded ref 2 "blockswitch-mono"))
+    (testing "sanity: the click survives — the EIGHT_SHORT frames are where the peak is"
+      (let [peak (fn [{:keys [pcm]}] (apply max (map #(abs (int %)) pcm)))
+            loudest (apply max-key peak decoded)]
+        (is (= eight-short (:window-sequence loudest)))
+        (is (> (peak loudest) 20000))))))
+
+;; --- blockswitch-stereo-nopns.aac -------------------------------------
+;;
+;; The same click, in a stereo pair whose two channels carry different tones
+;; (left 440 Hz / right 880 Hz) so a channel swap shows up as the wrong
+;; frequency rather than merely the wrong numbers:
+;;
+;;   ffmpeg -f lavfi -i "aevalsrc='0.3*sin(2*PI*440*t)+0.9*between(t,0.25,0.2502)\
+;;                               |0.3*sin(2*PI*880*t)+0.9*between(t,0.25,0.2502)':\
+;;                       s=44100:d=0.5:c=stereo" \
+;;     -ac 2 -c:a aac -aac_pns 0 -aac_is 0 -aac_tns 0 -b:a 192k -profile:a aac_low \
+;;     blockswitch-stereo-nopns.aac
+;;   ffmpeg -i blockswitch-stereo-nopns.aac -f s16le -ar 44100 -ac 2 \
+;;     blockswitch-stereo-nopns.ref.pcm
+;;
+;; What this adds over the mono fixture is the one piece of CPE side info
+;; block switching changes: `ms_mask` carries one `ms_used` bit per (window
+;; group, scalefactor band) rather than one per band, so on an EIGHT_SHORT
+;; frame with four window groups it is four times as long. Reading the wrong
+;; number of bits there desynchronizes the rest of the frame, which is why a
+;; PCM comparison is a sufficient check for it — the failure mode is not
+;; subtle.
+(deftest blockswitch-stereo-golden-vector
+  (let [frames (adts/frames (rd-bytes "aac/fixtures/blockswitch-stereo-nopns.aac"))
+        ref (rd-pcm-s16le-stereo "aac/fixtures/blockswitch-stereo-nopns.ref.pcm")
+        decoded (decode-all-stereo frames)]
+    (is (= (count frames) (count decoded)))
+    (assert-block-switching! decoded "blockswitch-stereo")
+    (testing "both channels share one ics_info (common_window=1), so one window sequence"
+      (is (every? #(= (:window-sequence %) (:window-sequence-r %)) decoded)))
+    (testing "every frame, BOTH channels, matches real ffmpeg PCM within 2 LSB"
+      (doseq [[i {:keys [left right]}] (map-indexed vector decoded)]
+        (let [dl (max-diff left (subvec (:left ref) (* i 1024) (* (inc i) 1024)))
+              dr (max-diff right (subvec (:right ref) (* i 1024) (* (inc i) 1024)))]
+          (is (<= dl 2) (str "frame " i " LEFT max-diff " dl))
+          (is (<= dr 2) (str "frame " i " RIGHT max-diff " dr)))))
+    (testing "sanity: both channels are non-silent"
+      (let [{:keys [left right]} (nth decoded 5)]
+        (is (> (apply max (map #(abs (int %)) left)) 1000))
+        (is (> (apply max (map #(abs (int %)) right)) 1000))))))
+
+;; --- tone1000-nopns.aac (the original mono fixture) --------------------
+;;
+;;   ffmpeg -f lavfi -i "sine=frequency=1000:duration=0.35:sample_rate=44100" \
+;;     -ac 1 -c:a aac -aac_pns 0 -b:a 96k tone1000-nopns.aac
+;;   ffmpeg -i tone1000-nopns.aac -f s16le -ar 44100 -ac 1 tone1000-nopns.ref.pcm
+;;
+;; A sine starting abruptly from silence is itself a transient, so ffmpeg
+;; block-switches at frames 0-2 here too. This test used to decode only
+;; frames 3-13 and assert that frames 0-1 THREW; it now decodes the whole
+;; file, which is the same fixture bytes covering strictly more of the
+;; decoder. (This fixture predates the `-aac_tns 0` convention and does not
+;; need it — ffmpeg's encoder happens not to enable TNS on it.)
+(deftest tone1000-golden-vector
+  (let [frames (adts/frames (rd-bytes "aac/fixtures/tone1000-nopns.aac"))
+        ref (rd-pcm-s16le "aac/fixtures/tone1000-nopns.ref.pcm")
+        decoded (decode-all frames)]
+    (is (= (count frames) (count decoded)))
+    (testing "the onset transient block-switches (this fixture is not long-blocks-only)"
+      (is (contains? (set (map :window-sequence decoded)) eight-short)))
+    (testing "every frame matches real ffmpeg PCM within 2 LSB"
+      (compare-mono! decoded ref 2 "tone1000"))
+    (testing "sanity: the decoded tone is non-silent (real spectral data was decoded)"
+      (is (> (apply max (map #(abs (int %)) (:pcm (nth decoded 4)))) 1000)))))
+
+;; --- stereo-440-880-nopns.aac (the original stereo fixture) ------------
 ;;
 ;;   ffmpeg -f lavfi -i "sine=frequency=440:duration=0.35:sample_rate=44100" \
 ;;          -f lavfi -i "sine=frequency=880:duration=0.35:sample_rate=44100" \
 ;;     -filter_complex "[0:a][1:a]amerge=inputs=2[a]" -map "[a]" -ac 2 \
 ;;     -c:a aac -aac_pns 0 -aac_is 0 -b:a 192k -profile:a aac_low \
 ;;     stereo-440-880-nopns.aac
+;;   ffmpeg -i stereo-440-880-nopns.aac -f s16le -ar 44100 -ac 2 \
+;;     stereo-440-880-nopns.ref.pcm
 ;;
-;; `-aac_pns 0` disables Perceptual Noise Substitution (same reason as the
-;; mono fixture above). `-aac_is 0` ADDITIONALLY disables Intensity Stereo
-;; coding — discovered empirically during development: ffmpeg's real stereo
-;; encoder uses INTENSITY_HCB (codebook 15) for high scalefactor bands on
-;; real content even with PNS off (it's a SEPARATE encoder tool, gated by
-;; its own `-aac_is` AVOption, `ffmpeg -h encoder=aac`), and this repo's
-;; `aac.ics/scale-factor-data!` correctly throws on it (intensity stereo is
-;; explicitly out of scope — only mid/side is implemented, per
-;; `com-junkawasaki/root` task scope). Without `-aac_is 0`, frames 3-13
-;; below hit that throw. Mid/side stereo itself is NOT disabled — this
-;; fixture's frames 3-13 have `common_window=1`, `ms_mask_present=1` with a
-;; genuine MIX of per-band `ms_used` bits (verified during development by
-;; probing the raw bitstream directly, both 0s and 1s present, not
-;; uniformly all-on/all-off) — i.e. this one test exercises both branches
-;; of `aac.stereo/apply-ms` (M/S-reconstructed bands AND plain-L/R-passed-
-;; through bands in the SAME frame).
-;;
-;; Reference PCM: `ffmpeg -i stereo-440-880-nopns.aac -f s16le -ar 44100 -ac 2
-;; stereo-440-880-nopns.ref.pcm` (interleaved L/R — deinterleaved by
-;; `rd-pcm-s16le-stereo` above for per-channel comparison).
-;;
-;; Frame range/cold-start-caveat/tolerance rationale are IDENTICAL to
-;; `tone1000-golden-vector` above (frames 3-13 are this fixture's
-;; ONLY_LONG_SEQUENCE run too — verified during development to have the same
-;; LONG_START/EIGHT_SHORT-then-ONLY_LONG-then-LONG_START/EIGHT_SHORT
-;; transient-onset shape as the mono fixture; frame 3's own output is
-;; excluded from comparison for the same 50%-overlap-add cold-start reason;
-;; same <=2 LSB tolerance for the same float-vs-float rounding reason) — see
-;; that test's docstring for the full explanation, not repeated here. The
-;; only new thing this test adds is verifying BOTH channels independently
-;; (max observed diff on this fixture: 1 LSB, same as mono).
+;; `-aac_is 0` disables INTENSITY STEREO specifically (a separate encoder
+;; tool from PNS, gated by its own AVOption): ffmpeg's stereo encoder uses
+;; INTENSITY_HCB for high scalefactor bands on real content even with PNS
+;; off, and intensity stereo is out of this repo's scope, so
+;; `aac.ics/scale-factor-data!` correctly throws on it. Mid/side is NOT
+;; disabled — this fixture's long frames have `common_window=1`,
+;; `ms_mask_present=1` with a genuine MIX of per-band `ms_used` bits, so
+;; both branches of `aac.stereo/apply-ms` run in the same frame.
 (deftest stereo-golden-vector
-  (let [bytes (rd-bytes "aac/fixtures/stereo-440-880-nopns.aac")
-        frames (adts/frames bytes)
+  (let [frames (adts/frames (rd-bytes "aac/fixtures/stereo-440-880-nopns.aac"))
         ref (rd-pcm-s16le-stereo "aac/fixtures/stereo-440-880-nopns.ref.pcm")
-        decoded (decode-frame-range-stereo frames 3 14)] ;; frames 3..13 inclusive
-    (testing "11 frames decoded (3..13), all ONLY_LONG_SEQUENCE, both channels"
-      (is (= 11 (count decoded))))
-    (testing "frames 4..13 (skipping frame 3's own output) match real ffmpeg PCM within 2 LSB, BOTH channels independently"
-      (doseq [i (range 1 (count decoded))]
-        (let [overall-frame-idx (+ 3 i)
-              [pcm-l pcm-r] (nth decoded i)
-              ref-start (* overall-frame-idx 1024)
-              ref-l (subvec (:left ref) ref-start (+ ref-start 1024))
-              ref-r (subvec (:right ref) ref-start (+ ref-start 1024))
-              l16 (mapv decode/pcm->int16 pcm-l)
-              r16 (mapv decode/pcm->int16 pcm-r)
-              max-diff (fn [a b] (apply max (map (fn [x y] (abs (- (int x) (int y)))) a b)))
-              diff-l (max-diff l16 ref-l)
-              diff-r (max-diff r16 ref-r)]
-          (is (<= diff-l 2) (str "frame " overall-frame-idx " LEFT max-diff " diff-l))
-          (is (<= diff-r 2) (str "frame " overall-frame-idx " RIGHT max-diff " diff-r)))))
-    (testing "sanity: both channels are non-silent (real spectral data was actually decoded, not accidentally all-zero)"
-      (let [[pcm-l pcm-r] (nth decoded 1)]
-        (is (> (apply max (map (fn [x] (abs (int x))) (mapv decode/pcm->int16 pcm-l))) 1000))
-        (is (> (apply max (map (fn [x] (abs (int x))) (mapv decode/pcm->int16 pcm-r))) 1000))))))
+        decoded (decode-all-stereo frames)]
+    (is (= (count frames) (count decoded)))
+    (testing "every frame, BOTH channels, matches real ffmpeg PCM within 2 LSB"
+      (doseq [[i {:keys [left right]}] (map-indexed vector decoded)]
+        (let [dl (max-diff left (subvec (:left ref) (* i 1024) (* (inc i) 1024)))
+              dr (max-diff right (subvec (:right ref) (* i 1024) (* (inc i) 1024)))]
+          (is (<= dl 2) (str "frame " i " LEFT max-diff " dl))
+          (is (<= dr 2) (str "frame " i " RIGHT max-diff " dr)))))
+    (testing "sanity: both channels are non-silent"
+      (let [{:keys [left right]} (nth decoded 4)]
+        (is (> (apply max (map #(abs (int %)) left)) 1000))
+        (is (> (apply max (map #(abs (int %)) right)) 1000))))))
+
+(deftest silence-golden-vector
+  (let [frames (adts/frames (rd-bytes "aac/fixtures/silence.aac"))
+        ref (rd-pcm-s16le "aac/fixtures/silence.ref.pcm")
+        decoded (decode-all frames)]
+    (testing "all frames are ONLY_LONG_SEQUENCE with max_sfb=0 (no sections at all — the simplest possible legal ICS)"
+      (is (= (count frames) (count decoded)))
+      (is (every? #(= only-long (:window-sequence %)) decoded)))
+    (testing "silent input decodes to (near-)silent PCM, matching ffmpeg's own silent decode"
+      (compare-mono! decoded ref 2 "silence"))))
+
+;; --- unit tests for the block-switching side info ---------------------
+
+(deftest window-grouping
+  (testing "scale_factor_grouping -> window group lengths (§4.5.2.3.2)"
+    (testing "all seven bits set: one group of eight"
+      (is (= [8] (ics/window-group-lengths 2r1111111))))
+    (testing "no bits set: eight groups of one"
+      (is (= [1 1 1 1 1 1 1 1] (ics/window-group-lengths 2r0000000))))
+    (testing "the two values the committed block-switching fixtures actually carry"
+      (is (= [1 3 3 1] (ics/window-group-lengths 54)))
+      (is (= [1 1 3 3] (ics/window-group-lengths 27)))))
+  (testing "every one of the 128 possible groupings covers exactly the eight windows"
+    (doseq [g (range 128)]
+      (let [lens (ics/window-group-lengths g)]
+        (is (= 8 (reduce + lens)) (str "grouping " g " -> " lens))
+        (is (every? pos? lens) (str "grouping " g " -> " lens))))))
+
+(deftest short-band-ranges
+  (testing "a long window_sequence's band ranges are just the swb_offset pairs"
+    (let [r (ics/band-ranges 4 0 49 [1])]
+      (is (= 49 (count r)))
+      (is (= [0 4] (first r)))
+      (is (= [928 1024] (last r)))))
+  (testing "EIGHT_SHORT: each group occupies len*128 coefficients, bands scaled by len"
+    ;; grouping [1 3 3 1] over the 44.1/48 kHz short table
+    ;; (0 4 8 12 16 20 28 36 44 56 68 80 96 112 128), max_sfb 14
+    (let [r (ics/band-ranges 4 2 14 [1 3 3 1])]
+      (is (= (* 4 14) (count r)))
+      (testing "group 0 (length 1) is one plain 128-line window"
+        (is (= [0 4] (nth r 0)))
+        (is (= [112 128] (nth r 13))))
+      (testing "group 1 (length 3) starts at 128 and holds 3*128 coefficients,
+                with each band three windows wide"
+        (is (= [128 140] (nth r 14)))          ;; band 0: 3 windows x 4 lines
+        (is (= [140 152] (nth r 15)))
+        (is (= [464 512] (nth r 27))))         ;; band 13: 3 x 16, ending at 128+384
+      (testing "the ranges tile the frame exactly, with no gap and no overlap"
+        (is (= 1024 (second (last r))))
+        (is (every? (fn [[[_ e] [s _]]] (= e s)) (partition 2 1 r)))))))
+
+(deftest short-spectrum-deinterleave
+  (testing "grouped bitstream order -> transform order (eight 128-line blocks)"
+    ;; Build a spectrum whose value at every position encodes where it is in
+    ;; the GROUPED layout, then check each transform-order slot picks up the
+    ;; grouped position §4.5.2.3.4 says it should.
+    (let [groups [1 3 3 1]
+          swb (into [] (map double) [0 4 8 12 16 20 28 36 44 56 68 80 96 112 128])
+          grouped (vec (map double (range 1024)))
+          out (ics/deinterleave-short-spectrum grouped 4 groups)
+          ;; independent recomputation of the mapping, written the other way
+          ;; round (walk the OUTPUT, ask where each slot came from)
+          expected (vec (for [w (range 8) k (range 128)]
+                          (let [g (loop [g 0 acc 0]
+                                    (if (< w (+ acc (nth groups g)))
+                                      g
+                                      (recur (inc g) (+ acc (nth groups g)))))
+                                w0 (reduce + (take g groups))
+                                len (nth groups g)
+                                base (* 128 (reduce + (take g groups)))
+                                sfb (loop [i 0] (if (< k (nth swb (inc i))) i (recur (inc i))))
+                                lo (long (nth swb sfb))
+                                width (long (- (nth swb (inc sfb)) lo))]
+                            (nth grouped (+ base (* len lo) (* (- w w0) width) (- k lo))))))]
+      (is (= expected out))
+      (testing "it is a permutation — nothing is dropped or duplicated"
+        (is (= (set grouped) (set out))))))
+  (testing "eight groups of one IS the identity — each group holds a single window,
+            so the grouped order is already window-major"
+    (let [grouped (vec (map double (range 1024)))]
+      (is (= grouped (ics/deinterleave-short-spectrum grouped 4 [1 1 1 1 1 1 1 1])))))
+  (testing "one group of eight is NOT the identity — that is the maximally interleaved
+            case, where every band holds all eight windows before the next band starts,
+            so window 1's first coefficient sits at grouped index 4 (band 0 is 4 lines
+            wide, times 8 windows = 32 coefficients before band 1)"
+    (let [grouped (vec (map double (range 1024)))
+          out (ics/deinterleave-short-spectrum grouped 4 [8])]
+      (is (not= grouped out))
+      (is (= (set grouped) (set out)))
+      (is (= [0.0 1.0 2.0 3.0] (subvec out 0 4)))       ;; window 0, band 0
+      (is (= [4.0 5.0 6.0 7.0] (subvec out 128 132)))   ;; window 1, band 0
+      (is (= [32.0 33.0 34.0 35.0] (subvec out 4 8)))))) ;; window 0, band 1
 
 ;; Mid/side stereo requires `common_window`==1 (§4.6.8.1) — this repo's
 ;; `aac.ics/decode-channel-pair-element!` correctly returns `:ms-mask` nil
 ;; whenever `common_window`==0 (each channel then has its own independent
 ;; ics_info(), which `aac.stereo/apply-ms` treats as a pass-through). This
-;; repo's real stereo fixture always has `common_window`==1 (verified during
-;; development), so there is no REAL bitstream available to exercise the
-;; `common_window`==0 branch end-to-end here — this test instead verifies
-;; the pass-through contract directly against `aac.stereo/apply-ms`
-;; (unit-level, not a bitstream/golden-vector test).
+;; repo's real stereo fixtures always have `common_window`==1 (verified
+;; during development), so there is no REAL bitstream available to exercise
+;; the `common_window`==0 branch end-to-end here — this test instead
+;; verifies the pass-through contract directly against
+;; `aac.stereo/apply-ms` (unit-level, not a bitstream/golden-vector test).
 (deftest ms-nil-mask-is-pass-through
   (testing "aac.stereo/apply-ms is a no-op pass-through when ms-mask is nil (common_window=0 case)"
     (let [spec0 (vec (repeatedly 1024 #(- (rand) 0.5)))
           spec1 (vec (repeatedly 1024 #(- (rand) 0.5)))
-          [l r] (stereo/apply-ms spec0 spec1 nil (tables/swb-offsets 4))]
+          [l r] (stereo/apply-ms spec0 spec1 nil (ics/band-ranges 4 0 49 [1]))]
       (is (= spec0 l))
       (is (= spec1 r)))))
+
+(deftest out-of-scope-tools-still-throw
+  (testing "max_sfb past the band table is refused rather than read off the end"
+    ;; 50 > num_swb_long (49); 15 > num_swb_short (14)
+    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 4 0 50 [1])))
+    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 4 2 15 [1 3 3 1]))))
+  (testing "sample rates outside 44100/48000 are refused rather than mis-banded"
+    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 5 0 49 [1])))
+    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 5 2 14 [8])))))
