@@ -26,7 +26,7 @@
    other direction. Requires `ffmpeg` on PATH; without it the first two files
    are still written and the command to finish the job is printed."
   (:require [clojure.java.io :as io]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [aac.decode :as decode]
             [aac.encode :as encode]))
 
