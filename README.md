@@ -46,7 +46,7 @@ per-format-spec repos; see `com-junkawasaki/root` ADR precedent
   from its first frame.
 - Explicitly **out of scope** for decode (all throw rather than
   mis-decode): intensity stereo (a per-band pseudo-codebook, separate from
-  mid/side and NOT implemented — see `test/aac/decode_test.clj`'s stereo
+  mid/side and NOT implemented — see `test/aac/decode_test.cljk`'s stereo
   fixture comment for why this one bites in practice even with PNS
   disabled), LFE/coupling channels, SBR/PS (this is plain AAC-LC, not
   HE-AAC/v2), LTP, predictor/pulse/TNS/gain-control tools, and PNS
@@ -131,7 +131,7 @@ methodology `org-iso-h264`'s `decode_test.clj` and `kotoba-lang/utsushi`'s
 `mp4_h264_test.clj` use). Every fixture is decoded **from frame 0 to the end
 of the file**, transients included. Max observed diff across every frame of
 every fixture: **1 LSB** of a 16-bit sample (most samples bit-exact) — see
-`test/aac/decode_test.clj`'s docstring for the full methodology, tolerance
+`test/aac/decode_test.cljk`'s docstring for the full methodology, tolerance
 rationale (floating-point IMDCT rounding, not a decode bug), and why the
 fixtures needed `-aac_pns 0`/`-aac_tns 0`.
 
@@ -169,7 +169,7 @@ MIX of `ms_used` bits (not uniformly on/off) — exercising both the
 M/S-reconstructed and plain-L/R-passed-through code paths in the same
 frame. Both channels independently match `ffmpeg`'s own PCM decode to the
 same **1 LSB** max-diff as the mono case — see
-`test/aac/decode_test.clj`'s `stereo-golden-vector` fixture comment for why
+`test/aac/decode_test.cljk`'s `stereo-golden-vector` fixture comment for why
 `-aac_is 0` (disabling INTENSITY STEREO specifically, a separate
 out-of-scope tool) was additionally required beyond `-aac_pns 0`.
 
@@ -189,7 +189,7 @@ ffmpeg; regenerate them with `clojure -M:fixtures` (see `aac.dev.fixtures`).
 Byte-exactness against the fixture is deliberately not asserted —
 `Math/pow`/`Math/cos` are not required to be identical across platforms, so
 that would be a portability trap rather than a correctness check; see
-`test/aac/encode_test.clj`'s docstring.
+`test/aac/encode_test.cljk`'s docstring.
 
 The forward filterbank (`aac.mdct`) is pinned by perfect reconstruction
 rather than by a reference: `analyze-frame` -> `aac.imdct/decode-frame`

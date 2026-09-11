@@ -21,7 +21,7 @@
      all: encoders switch to EIGHT_SHORT at every transient, so a stream
      with any attack in it — which is every stream that is not a steady
      tone — used to be undecodable from its very first frame. The
-     `test/aac/decode_test.clj` fixtures now decode from frame 0 through the
+     `test/aac/decode_test.cljk` fixtures now decode from frame 0 through the
      end of the file, transients included, rather than from a hand-picked
      steady-state frame range.
    - **No SBR/PS** (this is plain AAC-LC, not HE-AAC/HE-AACv2), **no LTP**,
@@ -168,7 +168,7 @@
    `prev-window-shape`/`prev-overlap` for the NEXT frame; `:window-sequence`
    and `:window-group-lengths` are reported so a caller can tell whether the
    encoder block-switched here, and how it grouped the eight short windows
-   (`test/aac/decode_test.clj` uses it to assert that a fixture really does
+   (`test/aac/decode_test.cljk` uses it to assert that a fixture really does
    contain the window sequences its test claims to exercise — a block
    switching test whose fixture had drifted to long blocks only would
    otherwise pass while testing nothing)."
@@ -198,7 +198,7 @@
    preceding frame) — only the SECOND frame onward is bit-comparable,
    because each frame's own second-half overlap state (saved for the next
    frame) is computed independent of the input history, only the additive
-   output for that one frame is affected. `test/aac/decode_test.clj`
+   output for that one frame is affected. `test/aac/decode_test.cljk`
    exploits exactly this to validate a mid-stream frame range against real
    ffmpeg PCM output (skipping the first decoded frame's own output)."
   [frames]

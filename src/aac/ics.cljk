@@ -16,7 +16,7 @@
    streams (perceptual noise substitution replaces sparse high-frequency
    content with synthesized noise, and is on by default) — real fixtures
    for this repo's tests were generated with `-aac_pns 0` for exactly this
-   reason (see `test/aac/decode_test.clj`'s docstring). PNS is also
+   reason (see `test/aac/decode_test.cljk`'s docstring). PNS is also
    fundamentally not bit-exact-comparable across independent decoders even
    when implemented: the spec does not mandate a specific noise generator,
    so any two spec-compliant decoders synthesize DIFFERENT sample values
@@ -82,7 +82,7 @@
      regardless of common_window — only the ics_info() read itself is
      conditionally skipped and shared).
    - Empirically verified against `ffmpeg -c:a aac`-encoded real stereo
-     content (see `test/aac/decode_test.clj`'s stereo golden-vector tests):
+     content (see `test/aac/decode_test.cljk`'s stereo golden-vector tests):
      `common_window=1`, `ms_mask_present=1` with a genuine MIX of 0/1
      per-band `ms_used` bits (not all-0 or all-1) — i.e. the real fixtures
      exercise both the M/S-applied and M/S-not-applied code paths in

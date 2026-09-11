@@ -32,7 +32,7 @@
    bits the biased form saves are not free quality: the loop simply spends them
    on a finer scalefactor. Which one wins at EQUAL BITRATE is an empirical
    question, and it is measured rather than assumed —
-   `test/aac/encode_test.clj`'s `rounding-mode-comparison` encodes the same
+   `test/aac/encode_test.cljk`'s `rounding-mode-comparison` encodes the same
    input both ways at the same bit budget and compares reconstruction SNR.
 
    ## Per-band scalefactors and noise shaping
