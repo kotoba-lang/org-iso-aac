@@ -1,7 +1,7 @@
 (ns aac.dev.fixtures
   "Regenerates the ENCODE-side test fixtures under `resources/aac/fixtures/`:
 
-     clojure -M:fixtures
+     kbb -M:fixtures
 
    Not part of `src` and not on the library's classpath — it exists so the
    fixtures are reproducible rather than mystery bytes, which matters more here

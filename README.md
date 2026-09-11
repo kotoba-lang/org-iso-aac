@@ -146,7 +146,7 @@ while exercising nothing. Both fixtures match ffmpeg's own decode to the
 same **1 LSB** across all 23 frames.
 
 That the 2 LSB bound is not merely permissive was checked by breaking the
-implementation on purpose and confirming `clojure -M:test -n aac.decode-test`
+implementation on purpose and confirming `kbb -M:test -n aac.decode-test`
 goes red:
 
 | deliberate break | result | worst diff |
@@ -185,7 +185,7 @@ SNR (mono, 125.6 kbit/s) / **37.9 dB** per channel (stereo, 182.5 kbit/s).
 Those fixtures deliberately mix tones with broadband dither, which is what
 holds the number down — a tones-only source reaches ~62 dB at the same rate.
 The fixtures include ffmpeg's answer so CI needs no
-ffmpeg; regenerate them with `clojure -M:fixtures` (see `aac.dev.fixtures`).
+ffmpeg; regenerate them with `kbb -M:fixtures` (see `aac.dev.fixtures`).
 Byte-exactness against the fixture is deliberately not asserted —
 `Math/pow`/`Math/cos` are not required to be identical across platforms, so
 that would be a portability trap rather than a correctness check; see
@@ -211,7 +211,7 @@ by eye).
 ## Test
 
 ```sh
-clojure -M:test
-clojure -M:lint
-clojure -M:fixtures   # regenerate the encode-side fixtures (needs ffmpeg)
+kbb -M:test
+kbb -M:lint
+kbb -M:fixtures   # regenerate the encode-side fixtures (needs ffmpeg)
 ```

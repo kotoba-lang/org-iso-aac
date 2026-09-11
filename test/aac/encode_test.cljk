@@ -12,7 +12,7 @@
    independent decoder reads THIS encoder's output and recovers the audio.
 
    So the direction flips: this repo encodes, and real ffmpeg decodes. The
-   committed fixtures (regenerate with `clojure -M:fixtures`, see
+   committed fixtures (regenerate with `kbb -M:fixtures`, see
    `aac.dev.fixtures`) are
 
      encode-tone-{mono,stereo}.src.pcm      the encoder's exact input (s16le)
