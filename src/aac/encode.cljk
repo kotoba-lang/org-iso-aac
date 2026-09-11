@@ -13,7 +13,7 @@
    did not encode, so `ffmpeg` could not be dropped from the pipeline no
    matter how fast the video path got. This namespace closes that gap. The
    proof that it is closed is not that it runs — it is that REAL ffmpeg
-   decodes its output and gets the signal back (`test/aac/encode_test.clj`,
+   decodes its output and gets the signal back (`test/aac/encode_test.cljk`,
    which runs the repo's golden-vector methodology in reverse).
 
    ## Scope, stated as limitations rather than as features
@@ -41,7 +41,7 @@
    - **Mono (SCE) and stereo (CPE)** at 44100 or 48000 Hz — the sample rates
      `aac.tables` has scalefactor-band tables for.
    - **O(N^2) forward MDCT.** See `aac.mdct`; adequate here, and measured in
-     `test/aac/encode_test.clj` rather than assumed.
+     `test/aac/encode_test.cljk` rather than assumed.
 
    Everything in that list is a thing this encoder does not do, not a thing
    the format cannot do; each is a separate follow-on, and none of them is

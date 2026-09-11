@@ -38,7 +38,7 @@
    this reconstruction and comparing both resulting channels against
    `ffmpeg`'s own PCM decode of the same file matches to the same ~1 LSB
    tolerance as this repo's existing mono validation — see
-   `test/aac/decode_test.clj`'s stereo golden-vector test."
+   `test/aac/decode_test.cljk`'s stereo golden-vector test."
   )
 
 (defn apply-ms

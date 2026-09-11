@@ -37,7 +37,7 @@
    sine and the KBD window satisfy) — but only if the leading factor is 1,
    so `s = 2`.
 
-   That derivation is not taken on faith: `test/aac/mdct_test.clj` feeds real
+   That derivation is not taken on faith: `test/aac/mdct_test.cljk` feeds real
    signal through `analyze-frame` -> `aac.imdct/decode-frame` and asserts
    perfect reconstruction to ~1e-9 for BOTH window shapes, and asserts it
    FAILS at s=1 (so the test would catch a silently-wrong scale rather than

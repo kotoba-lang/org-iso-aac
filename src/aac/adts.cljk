@@ -99,7 +99,7 @@
 
    Emitted through `aac.bits`' writer rather than by hand-assembling six bytes
    so that the field ORDER in this function is the same reading order
-   `parse-header` documents; `test/aac/adts_test.clj` round-trips the two."
+   `parse-header` documents; `test/aac/adts_test.cljk` round-trips the two."
   [{:keys [sampling-frequency-index channel-configuration frame-length
            mpeg-version profile]
     :or {mpeg-version 0 profile aac-lc-audio-object-type}}]
