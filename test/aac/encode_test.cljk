@@ -45,7 +45,7 @@
    than a perceptual encoder's while sounding no better — see `aac.encode`'s
    namespace docstring. A regression that made the audio worse would show up
    here; an SNR number here is not evidence of quality parity with ffmpeg."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [aac.adts :as adts]
             [aac.bits :as bits]

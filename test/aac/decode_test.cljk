@@ -79,7 +79,7 @@
    fixtures, not just the new ones: a sine starting abruptly from silence is
    itself a transient, so `tone1000-nopns.aac` and
    `stereo-440-880-nopns.aac` block-switch at their own stream onset."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [aac.adts :as adts]
             [aac.decode :as decode]
