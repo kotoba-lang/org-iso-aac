@@ -5,7 +5,7 @@
    asserts the ADTS header decodes to the same values, and that frame
    splitting is self-consistent (each computed frame boundary lands on a
    real 0xFF sync byte for the next frame)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [aac.adts :as adts]))
 

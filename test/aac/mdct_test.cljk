@@ -13,7 +13,7 @@
    asserts that the reconstruction FAILS when the forward scale is perturbed
    — otherwise a test that only checks 'round trip works' would pass for a
    transform pair that is off by a constant everywhere."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [aac.mdct :as mdct]
             [aac.imdct :as imdct]))
 
