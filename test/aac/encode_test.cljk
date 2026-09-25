@@ -45,8 +45,8 @@
    than a perceptual encoder's while sounding no better — see `aac.encode`'s
    namespace docstring. A regression that made the audio worse would show up
    here; an SNR number here is not evidence of quality parity with ffmpeg."
-  (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.java.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
+            [kotoba.io :as io]
             [aac.adts :as adts]
             [aac.bits :as bits]
             [aac.decode :as decode]
@@ -295,13 +295,13 @@
           (is (= delta (huffman/decode-scalefactor-dpcm! r)))
           (is (= written (huffman/scalefactor-delta-bits delta)))))))
   (testing "and a delta outside it throws rather than emitting a stream no decoder can read"
-    (is (thrown? clojure.lang.ExceptionInfo (huffman/write-scalefactor-dpcm! (bits/writer) 61)))
-    (is (thrown? clojure.lang.ExceptionInfo (huffman/scalefactor-delta-bits -61)))))
+    (is (thrown? kerror/ExceptionInfo (huffman/write-scalefactor-dpcm! (bits/writer) 61)))
+    (is (thrown? kerror/ExceptionInfo (huffman/scalefactor-delta-bits -61)))))
 
 (deftest codebook-range-is-enforced-not-clamped
   (testing "a value a codebook cannot represent throws — silently clamping would emit audio that is not what was quantized"
-    (is (thrown? clojure.lang.ExceptionInfo (huffman/tuple->idx 1 [2 0 0 0])))     ; cb1 lav 1
-    (is (thrown? clojure.lang.ExceptionInfo (huffman/tuple->idx 7 [8 0])))         ; cb7 lav 7
+    (is (thrown? kerror/ExceptionInfo (huffman/tuple->idx 1 [2 0 0 0])))     ; cb1 lav 1
+    (is (thrown? kerror/ExceptionInfo (huffman/tuple->idx 7 [8 0])))         ; cb7 lav 7
     (is (false? (huffman/codebook-fits? 1 [2 0 0 0])))
     (is (true? (huffman/codebook-fits? 5 [-4 4])))
     (is (true? (huffman/codebook-fits? 11 [8191 -16])))))
@@ -392,9 +392,9 @@
 
 (deftest rejects-unsupported-configuration
   (testing "a sample rate with no scalefactor-band table fails loudly rather than producing a mislabelled stream (22050 Hz HAS an ADTS index, so it is aac.tables that refuses)"
-    (is (thrown? clojure.lang.ExceptionInfo (encode/encode-mono [0.0] {:sample-rate 22050}))))
+    (is (thrown? kerror/ExceptionInfo (encode/encode-mono [0.0] {:sample-rate 22050}))))
   (testing "and one with no ADTS index at all fails too"
-    (is (thrown? clojure.lang.ExceptionInfo (encode/encode-mono [0.0] {:sample-rate 44101})))))
+    (is (thrown? kerror/ExceptionInfo (encode/encode-mono [0.0] {:sample-rate 44101})))))
 
 ;; --- ADTS / AudioSpecificConfig write direction --------------------------
 
@@ -416,13 +416,13 @@
         (is (true? (:protection-absent? h)))
         (is (= 7 (:header-length h))))))
   (testing "a frame length the 13-bit field cannot hold is refused"
-    (is (thrown? clojure.lang.ExceptionInfo
+    (is (thrown? kerror/ExceptionInfo
                  (adts/write-header {:sampling-frequency-index 4 :channel-configuration 1
                                      :frame-length 8192}))))
   (testing "sampling-frequency-index is the inverse of the rate table"
     (is (= 4 (adts/sampling-frequency-index 44100)))
     (is (= 3 (adts/sampling-frequency-index 48000)))
-    (is (thrown? clojure.lang.ExceptionInfo (adts/sampling-frequency-index 44101)))))
+    (is (thrown? kerror/ExceptionInfo (adts/sampling-frequency-index 44101)))))
 
 (deftest audio-specific-config-bytes
   (testing "the 2-byte AudioSpecificConfig an MP4 esds needs: AOT 2 (AAC-LC), then sfi, then channel config"

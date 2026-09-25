@@ -25,7 +25,7 @@
    audio — the same golden-vector methodology `aac.decode-test` uses, run in the
    other direction. Requires `ffmpeg` on PATH; without it the first two files
    are still written and the command to finish the job is printed."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.io :as io]
             [kotoba.lang.text :as str]
             [aac.decode :as decode]
             [aac.encode :as encode]))

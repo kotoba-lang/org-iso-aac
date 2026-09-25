@@ -79,8 +79,8 @@
    fixtures, not just the new ones: a sine starting abruptly from silence is
    itself a transient, so `tone1000-nopns.aac` and
    `stereo-440-880-nopns.aac` block-switch at their own stream onset."
-  (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.java.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
+            [kotoba.io :as io]
             [aac.adts :as adts]
             [aac.decode :as decode]
             [aac.ics :as ics]
@@ -433,8 +433,8 @@
 (deftest out-of-scope-tools-still-throw
   (testing "max_sfb past the band table is refused rather than read off the end"
     ;; 50 > num_swb_long (49); 15 > num_swb_short (14)
-    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 4 0 50 [1])))
-    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 4 2 15 [1 3 3 1]))))
+    (is (thrown? kerror/ExceptionInfo (ics/band-ranges 4 0 50 [1])))
+    (is (thrown? kerror/ExceptionInfo (ics/band-ranges 4 2 15 [1 3 3 1]))))
   (testing "sample rates outside 44100/48000 are refused rather than mis-banded"
-    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 5 0 49 [1])))
-    (is (thrown? clojure.lang.ExceptionInfo (ics/band-ranges 5 2 14 [8])))))
+    (is (thrown? kerror/ExceptionInfo (ics/band-ranges 5 0 49 [1])))
+    (is (thrown? kerror/ExceptionInfo (ics/band-ranges 5 2 14 [8])))))
