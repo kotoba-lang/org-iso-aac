@@ -6,7 +6,7 @@
    splitting is self-consistent (each computed frame boundary lands on a
    real 0xFF sync byte for the next frame)."
   (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             [aac.adts :as adts]))
 
 (defn- rd [p] (mapv #(bit-and (int %) 0xff)

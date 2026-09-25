@@ -13,7 +13,7 @@
    asserts that the reconstruction FAILS when the forward scale is perturbed
    — otherwise a test that only checks 'round trip works' would pass for a
    transform pair that is off by a constant everywhere."
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [aac.mdct :as mdct]
             [aac.imdct :as imdct]))
 
@@ -130,5 +130,5 @@
 
 (deftest imdct-rejects-wrong-spectrum-length
   (testing "an N/2 mismatch throws rather than reading a truncated transform"
-    (is (thrown? clojure.lang.ExceptionInfo (imdct/imdct (vec (repeat 512 0.0)) 2048)))
-    (is (thrown? clojure.lang.ExceptionInfo (imdct/imdct (vec (repeat 1024 0.0)) 256)))))
+    (is (thrown? kerror/ExceptionInfo (imdct/imdct (vec (repeat 512 0.0)) 2048)))
+    (is (thrown? kerror/ExceptionInfo (imdct/imdct (vec (repeat 1024 0.0)) 256)))))
